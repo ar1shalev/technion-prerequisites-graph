@@ -1613,6 +1613,7 @@ function setupEventListeners() {
         activeDays.add(day);
         e.currentTarget.classList.add("active");
       }
+      renderGraph(); // Re-apply filter to graph
     });
   });
 
