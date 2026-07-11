@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>מפת קורסים טכניון | SAP Course Dependency Visualizer</title>
+  
+  <!-- SEO Meta Tags -->
+  <meta name="description" content="כלי אינטראקטיבי מתקדם למיפוי ויזואלי של קורסים בטכניון, דרישות הקדם שלהם ומסלולי פתיחת קורסים. חפשו קורס וצפו מיידית בעץ הדרישות וההשפעות שלו.">
+  <meta name="keywords" content="טכניון, קורסים, מפת קורסים, דרישות קדם, רישום, SAP, Technion, Courses, Prerequisites, Graph, Visualization">
+  <meta name="author" content="Antigravity Pair-Programming Agent">
+  
+  <!-- Font and Icon Libraries -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Vis.js Standalone Network Library CDN -->
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  
+  <!-- Project Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Premium Decorative Background Glows -->
+  <div class="bg-glow"></div>
+  <div class="bg-glow-secondary"></div>
+
+  <!-- Main Application Wrapper -->
+  <div class="app-container">
+    
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="header-title-container">
+        <i class="fa-solid fa-network-wired"></i>
+        <h1 class="header-title">מפת דרישות הקורסים בטכניון</h1>
+      </div>
+      
+      <div class="header-controls">
+        <button class="theme-toggle-btn" id="theme-toggle-btn" title="שנה מצב צבע (בהיר/כהה)" aria-label="שינוי ערכת נושא">
+          <i class="fa-solid fa-sun icon-light"></i>
+          <i class="fa-solid fa-moon icon-dark"></i>
+        </button>
+        <div class="select-wrapper">
+          <select id="semester-select" title="בחר סמסטר">
+            <!-- Dynamically populated -->
+            <option>טוען סמסטרים...</option>
+          </select>
+        </div>
+      </div>
+    </header>
+    
+    <!-- Main Workspace Area -->
+    <div class="main-workspace">
+      
+      <!-- Right Sidebar (RTL Search & Details) -->
+      <aside class="sidebar" id="sidebar">
+        
+        <!-- Search Panel -->
+        <div class="search-container">
+          <div class="search-input-wrapper">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input type="text" id="course-search" class="search-input" placeholder="חפש קורס לפי שם או מספר מקצוע..." autocomplete="off">
+            <i class="fa-solid fa-xmark clear-icon" id="clear-search-btn" title="נקה חיפוש"></i>
+          </div>
+          <!-- Autocomplete Dropdown suggestions list -->
+          <div id="search-suggestions" class="suggestions-list"></div>
+        </div>
+        
+        <!-- Interactive Course Details view -->
+        <div class="details-scroll-area" id="details-scroll-area">
+          <div class="welcome-panel">
+            <i class="fa-solid fa-circle-nodes"></i>
+            <h3>חקור את קורסי הטכניון</h3>
+            <p>חפש קורס בתיבת החיפוש למעלה או לחץ על קורס כלשהו בגרף על מנת לצפות בדרישות הקדם שלו, המקצועות שהוא פותח, סילבוס, לוח בחינות ושעות הרצאה.</p>
+          </div>
+        </div>
+        
+      </aside>
+      
+      <!-- Left Graph Display Canvas -->
+      <main class="canvas-area">
+        
+        <!-- Collapsible/Minimizable Filter Drawer on the Left -->
+        <div class="left-filters-panel collapsed" id="left-filters-panel">
+          <button class="left-filters-toggle" id="left-filters-toggle" title="סינון ופקולטות">
+            <i class="fa-solid fa-sliders"></i>
+            <span class="toggle-text" style="margin-right: 6px;">סינון ופקולטות</span>
+          </button>
+          
+          <div class="left-filters-content">
+            <!-- Faculty Filtering List -->
+            <div class="faculties-panel">
+              <div class="panel-title">
+                <span>פקולטות מוצגות</span>
+                <div>
+                  <button id="btn-select-all-faculties">בחר הכל</button>
+                  <span style="color: var(--text-muted); margin: 0 4px;">|</span>
+                  <button id="btn-clear-all-faculties">נקה הכל</button>
+                </div>
+              </div>
+              <div class="faculties-list" id="faculties-list">
+                <!-- Dynamically populated -->
+              </div>
+            </div>
+
+            <!-- Advanced Filters (Exam & Days & Historical) -->
+            <div class="filters-panel">
+              <div class="panel-title">פילטרים מתקדמים</div>
+              
+              <div class="filter-group">
+                <span class="filter-label">מבחן סופי:</span>
+                <div class="filter-buttons">
+                  <button class="filter-btn active" id="btn-exam-all" data-value="all">הכל</button>
+                  <button class="filter-btn" id="btn-exam-yes" data-value="has_exam">עם מבחן</button>
+                  <button class="filter-btn" id="btn-exam-no" data-value="no_exam">ללא מבחן</button>
+                </div>
+              </div>
+              
+              <div class="filter-group" style="margin-top: 10px;">
+                <span class="filter-label">ימי לימוד:</span>
+                <div class="days-list">
+                  <button class="day-tag" data-value="ראשון">א'</button>
+                  <button class="day-tag" data-value="שני">ב'</button>
+                  <button class="day-tag" data-value="שלישי">ג'</button>
+                  <button class="day-tag" data-value="רביעי">ד'</button>
+                  <button class="day-tag" data-value="חמישי">ה'</button>
+                  <button class="day-tag" data-value="שישי">ו'</button>
+                </div>
+              </div>
+
+              <!-- Historical Courses Filter -->
+              <div class="filter-group" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px;">
+                <label class="switch-container" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: var(--text-secondary); font-weight: 600;">
+                  <input type="checkbox" id="chk-show-historical" style="cursor: pointer; width: 14px; height: 14px;">
+                  <span>הצג קורסים מסמסטרים אחרים</span>
+                </label>
+              </div>
+
+              <!-- External Prerequisites Filter -->
+              <div class="filter-group" style="margin-top: 8px; padding-bottom: 4px;">
+                <label class="switch-container" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: var(--text-secondary); font-weight: 600;">
+                  <input type="checkbox" id="chk-show-external" style="cursor: pointer; width: 14px; height: 14px;">
+                  <span>הצג דרישות קדם חיצוניות (לא מוצעות)</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Floating View Tabs -->
+        <nav class="view-modes-panel" aria-label="מצבי תצוגת גרף">
+          <button class="view-mode-tab active" id="btn-view-faculty">גרף פקולטי</button>
+          <button class="view-mode-tab" id="btn-view-local">עץ קשרים ממוקד</button>
+          <button class="view-mode-tab" id="btn-view-global">גרף גלובלי מלא</button>
+        </nav>
+        
+        <!-- Dynamic Graph Canvas element -->
+        <div id="network-canvas"></div>
+        
+        <!-- Floating Graph Navigation Buttons -->
+        <div class="graph-controls">
+          <button class="control-btn" id="zoom-in-btn" title="התקרב"><i class="fa-solid fa-plus"></i></button>
+          <button class="control-btn" id="zoom-out-btn" title="התרחק"><i class="fa-solid fa-minus"></i></button>
+          <button class="control-btn" id="fit-btn" title="התאם למסך"><i class="fa-solid fa-expand"></i></button>
+          <button class="control-btn" id="physics-btn" title="עצור/הפעל סימולציית גרף" style="color: var(--text-primary);"><i class="fa-solid fa-pause"></i></button>
+        </div>
+        
+        <!-- Floating Legend -->
+        <section class="legend-panel" id="legend-panel">
+          <h2 class="legend-title">מקרא פקולטות</h2>
+          <div class="legend-items" id="legend-items">
+            <!-- Dynamically populated -->
+          </div>
+        </section>
+        
+        <!-- Loading Screen overlay -->
+        <div class="loading-overlay" id="loading-overlay">
+          <div class="spinner"></div>
+          <p class="loading-text">טוען קורסים ובונה מפת קשרים...</p>
+        </div>
+        
+      </main>
+      
+    </div>
+  </div>
+
+  <!-- Core App Logic -->
+  <script src="app.js"></script>
+</body>
+</html>

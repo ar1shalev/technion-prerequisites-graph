@@ -6,7 +6,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 0 1 * *'
 
 concurrency: generate-courses
 
@@ -43,7 +43,7 @@ jobs:
             echo "::add-mask::$PROXY_SERVER"
             PROXY_ARG="--proxy-server=$PROXY_SERVER"
           fi
-          python -u ./main/courses_to_json.py last-3 \
+          python -u ./main/courses_to_json.py last-8 \
             './gh-pages/courses_{year}_{semester}.json' \
             --min-js-output-file='./gh-pages/courses_{year}_{semester}.min.js' \
             --last-semesters-output-file './gh-pages/last_semesters.json' \

@@ -1,7 +1,6 @@
-# technion-sap-info-fetcher
+# technion-prerequisites-graph
 
-A script to fetch and parse Technion SAP courses information, to have it in an
-accessible format.
+An interactive course visualization graph for the Technion, organized by prerequisites, corequisites, and future unlock paths.
 
 A successor of
 [technion-ug-info-fetcher](https://github.com/michael-maltsev/technion-ug-info-fetcher).
@@ -86,3 +85,26 @@ An example of a course entry:
   ]
 }
 ```
+
+## Updating the Website with New Semester Data
+
+To update the interactive graph website with the latest semesters and course data from the Technion portal, follow these steps:
+
+### 1. Prerequisite Installations
+Make sure you have python3 and the required libraries installed:
+```bash
+pip install requests tqdm
+```
+
+### 2. Fetch and Re-generate Semester Files
+Run the scraper script with the `last-N` option. This will query the Technion servers for the active semesters list, create the select index, and pull course details for the last `N` semesters (we recommend pulling `8` semesters to cover a 3-year history, including Winter, Spring, and Summer terms):
+```bash
+python3 courses_to_json.py last-8 "data/courses_{year}_{semester}.json" --last-semesters-output-file "data/last_semesters.json"
+```
+
+The script will:
+- Write `data/last_semesters.json` containing the metadata for the active semesters.
+- Query and generate `data/courses_{year}_{semester}.json` files for each catalog term.
+
+### 3. Deploy
+Commit the updated `data/` folder and push to your GitHub Pages branch. The web application dynamically reads `data/last_semesters.json` and loads the corresponding course details as the user navigates, requiring no changes to the HTML, CSS, or JS files!

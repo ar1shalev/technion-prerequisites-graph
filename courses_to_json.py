@@ -1206,8 +1206,27 @@ def main():
         last_semesters = last_semesters[:semester_count]
 
         if args.last_semesters_output_file:
-            with Path(args.last_semesters_output_file).open("w", encoding="utf-8") as f:
-                json.dump(last_semesters, f, indent=2, ensure_ascii=False)
+            output_path = Path(args.last_semesters_output_file)
+            existing_semesters = []
+            if output_path.exists():
+                try:
+                    with output_path.open("r", encoding="utf-8") as f:
+                        existing_semesters = json.load(f)
+                        if not isinstance(existing_semesters, list):
+                            existing_semesters = []
+                except Exception as e:
+                    print(f"Warning: Could not read existing semesters file: {e}")
+
+            # Combine and unique by (year, semester)
+            combined = {(sem["year"], sem["semester"]): sem for sem in existing_semesters}
+            for sem in last_semesters:
+                combined[(sem["year"], sem["semester"])] = sem
+
+            # Convert back to list and sort descending by (year, semester)
+            sorted_semesters = sorted(combined.values(), key=lambda s: (s["year"], s["semester"]), reverse=True)
+
+            with output_path.open("w", encoding="utf-8") as f:
+                json.dump(sorted_semesters, f, indent=2, ensure_ascii=False)
 
         results = []
 
