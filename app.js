@@ -11,7 +11,15 @@ let activeDays = new Set(); // Set of days
 let courseSemestersMap = new Map(); // code -> Set of semesters
 let showAllHistoricalCourses = false;
 let showExternalCourses = false;
+let showSportsCourses = false;
+let currentFilteredCourses = []; // courses that match criteria, excluding prereqs
 let historicalCoursesInfo = new Map(); // code -> { name, faculty, points }
+
+// Branch Hiding State
+let hiddenCourses = new Set();  // all explicitly hidden course codes
+let hiddenBranches = [];         // [{root, rootName, codes: Set}]  — for individual restore
+let hiddenNodePositions = {};    // code -> {x, y}  — for exact coordinate restoration
+
 
 // Graph Adjacency Lists
 let adjList = new Map(); // code -> Set of prerequisite codes (needs)
@@ -166,6 +174,13 @@ async function loadSemesterData(semesterVal) {
     document.getElementById("course-search").value = "";
     document.getElementById("clear-search-btn").style.display = "none";
     selectedCourseCode = null;
+
+    // Clear hidden branches state
+    hiddenCourses.clear();
+    hiddenBranches = [];
+    hiddenNodePositions = {};
+    updateHiddenBranchesPanel();
+
     updateDetailsPanel();
 
     // Reset view
@@ -325,10 +340,7 @@ function populateFacultiesPanel() {
       }
       tag.classList.toggle("active");
 
-      // If we are in faculty view, we should re-render the graph
-      if (viewMode === 'faculty') {
-        renderGraph();
-      }
+      renderGraph();
     });
 
     container.appendChild(tag);
@@ -405,8 +417,8 @@ function updateLegend() {
   colorHeader.textContent = "מקרא צבעים לפי פקולטה:";
   container.appendChild(colorHeader);
 
-  // Show active faculties or all if global
-  const list = viewMode === 'global' ? faculties : Array.from(activeFaculties);
+  // Show only active faculties (applies consistently across all views now)
+  const list = Array.from(activeFaculties);
 
   if (list.length === 0) {
     const emptyMsg = document.createElement("div");
@@ -508,24 +520,46 @@ function wrapText(text, maxLineLength = 15) {
   return lines.join("\n");
 }
 
+// Check if a course is a sports course
+function isSportsCourse(course) {
+  const gen = course.general;
+  if (!gen) return false;
+  const name = gen["שם מקצוע"] || "";
+  const code = gen["מספר מקצוע"] || "";
+  return (
+    name.includes("חינוך גופני") ||
+    name.includes("ספורט") ||
+    name.includes("נבחרות ספורט") ||
+    name.includes("נבחרת ספורט") ||
+    code.startsWith("039408") ||
+    code.startsWith("039409")
+  );
+}
+
 // Filter validation helper
 function courseMatchesFilters(course) {
   const gen = course.general;
   if (!gen) return false;
 
-  // 1. Faculty filter (only if in faculty view)
-  if (viewMode === 'faculty') {
-    const fac = gen["פקולטה"];
-    if (!fac || !activeFaculties.has(fac.trim())) return false;
+  // 0. Explicitly hidden branches
+  if (hiddenCourses.has(gen["מספר מקצוע"])) return false;
+
+  // 1. Sports courses filter (hidden by default unless checked)
+  if (!showSportsCourses && isSportsCourse(course)) return false;
+
+  // 2. Faculty filter (always applied - the faculty panel controls what's visible in all views)
+  const fac = gen["פקולטה"];
+  if (!fac || !activeFaculties.has(fac.trim())) return false;
+
+  // 3. Exam filter (Historical courses don't have this semester's exam data)
+  if (!course.isHistorical) {
+    const hasExam = (gen["מועד א"] || gen["מועד ב"]);
+    if (examFilter === 'has_exam' && !hasExam) return false;
+    if (examFilter === 'no_exam' && hasExam) return false;
   }
 
-  // 2. Exam filter
-  const hasExam = (gen["מועד א"] || gen["מועד ב"]);
-  if (examFilter === 'has_exam' && !hasExam) return false;
-  if (examFilter === 'no_exam' && hasExam) return false;
-
-  // 3. Days filter
-  if (activeDays.size > 0) {
+  // 4. Days filter (Historical courses don't have this semester's schedule)
+  if (!course.isHistorical && activeDays.size > 0) {
     const schedule = course.schedule || [];
     const courseDays = new Set(schedule.map(item => item["יום"]));
 
@@ -543,6 +577,36 @@ function courseMatchesFilters(course) {
   return true;
 }
 
+// Compute currentFilteredCourses based on the active filters
+function refreshCurrentFilteredCourses() {
+  currentFilteredCourses = [];
+  for (const [code, course] of coursesMap.entries()) {
+    if (courseMatchesFilters(course)) {
+      currentFilteredCourses.push(course);
+    }
+  }
+
+  if (showAllHistoricalCourses) {
+    for (const [code, hist] of historicalCoursesInfo.entries()) {
+      if (!coursesMap.has(code)) {
+        const mockCourse = {
+          general: {
+            "מספר מקצוע": code,
+            "שם מקצוע": hist.name,
+            "פקולטה": hist.faculty,
+            "נקודות": hist.points
+          },
+          schedule: [],
+          isHistorical: true
+        };
+        if (courseMatchesFilters(mockCourse)) {
+          currentFilteredCourses.push(mockCourse);
+        }
+      }
+    }
+  }
+}
+
 // Generate the graph nodes and edges based on current filters and viewMode
 function generateGraphData() {
   const isLightTheme = document.body.classList.contains("light-theme");
@@ -551,6 +615,8 @@ function generateGraphData() {
   const addedNodes = new Set();
   const addedEdges = new Set();
 
+  refreshCurrentFilteredCourses();
+
   if (viewMode === 'local' && selectedCourseCode) {
     // Isolated local view: selected course, ancestors (prereqs), descendants (unlocks)
     const recursivePrereqs = Array.from(getRecursivePrereqs(selectedCourseCode));
@@ -558,8 +624,39 @@ function generateGraphData() {
 
     const allRelevantNodes = new Set([...recursivePrereqs, ...recursiveUnlocks, selectedCourseCode]);
 
-    // Add nodes
+    // Apply the active filters to the local tree nodes (excluding the selected course itself, which is always shown)
+    const filteredRelevantNodes = new Set();
     allRelevantNodes.forEach(code => {
+      if (code === selectedCourseCode) {
+        filteredRelevantNodes.add(code);
+        return;
+      }
+      let course = coursesMap.get(code);
+      if (!course) {
+        if (historicalCoursesInfo.has(code)) {
+          const hist = historicalCoursesInfo.get(code);
+          course = {
+            general: { "מספר מקצוע": code, "שם מקצוע": hist.name, "פקולטה": hist.faculty, "נקודות": hist.points },
+            schedule: [],
+            isHistorical: true
+          };
+        } else if (showExternalCourses) {
+          filteredRelevantNodes.add(code);
+          return;
+        } else {
+          return;
+        }
+      }
+
+      if (courseMatchesFilters(course)) {
+        if (!course.isHistorical || showAllHistoricalCourses || showExternalCourses) {
+          filteredRelevantNodes.add(code);
+        }
+      }
+    });
+
+    // Add nodes
+    filteredRelevantNodes.forEach(code => {
       const course = coursesMap.get(code);
       const isSelected = code === selectedCourseCode;
 
@@ -617,11 +714,11 @@ function generateGraphData() {
     });
 
     // Add edges between these nodes
-    allRelevantNodes.forEach(code => {
+    filteredRelevantNodes.forEach(code => {
       const prereqs = adjList.get(code);
       if (prereqs) {
         prereqs.forEach(pre => {
-          if (allRelevantNodes.has(pre)) {
+          if (filteredRelevantNodes.has(pre)) {
             const edgeId = `${pre}->${code}`;
             if (!addedEdges.has(edgeId)) {
               // Check if it's on a direct path to/from selected node
@@ -644,7 +741,7 @@ function generateGraphData() {
       const coReqs = coReqList.get(code);
       if (coReqs) {
         coReqs.forEach(co => {
-          if (allRelevantNodes.has(co)) {
+          if (filteredRelevantNodes.has(co)) {
             const edgeId1 = `${code}<->${co}`;
             const edgeId2 = `${co}<->${code}`;
             if (!addedEdges.has(edgeId1) && !addedEdges.has(edgeId2)) {
@@ -667,32 +764,7 @@ function generateGraphData() {
 
   } else {
     // Apply advanced filters and faculty/global constraints
-    let coreCourses = [];
-    for (const [code, course] of coursesMap.entries()) {
-      if (courseMatchesFilters(course)) {
-        coreCourses.push(code);
-      }
-    }
-
-    // Add historical courses that are not in coursesMap if showAllHistoricalCourses is enabled
-    if (showAllHistoricalCourses) {
-      for (const [code, hist] of historicalCoursesInfo.entries()) {
-        if (!coursesMap.has(code)) {
-          const mockCourse = {
-            general: {
-              "מספר מקצוע": code,
-              "שם מקצוע": hist.name,
-              "פקולטה": hist.faculty,
-              "נקודות": hist.points
-            },
-            schedule: []
-          };
-          if (courseMatchesFilters(mockCourse)) {
-            coreCourses.push(code);
-          }
-        }
-      }
-    }
+    let coreCourses = currentFilteredCourses.map(c => c.general["מספר מקצוע"]);
 
     // Add all core courses to the node list
     coreCourses.forEach(code => {
@@ -940,6 +1012,16 @@ function renderGraph() {
     }
   });
 
+  // Right-click on a node → show context menu
+  network.on("oncontext", (params) => {
+    params.event.preventDefault();
+    hideNodeContextMenu();
+    const nodeId = network.getNodeAt(params.pointer.DOM);
+    if (nodeId) {
+      showNodeContextMenu(nodeId, params.event.clientX, params.event.clientY);
+    }
+  });
+
   network.on("stabilizationProgress", (params) => {
     const progress = Math.round((params.iterations / params.total) * 100);
     showLoading(`מייצב את הגרף... ${progress}%`);
@@ -947,8 +1029,8 @@ function renderGraph() {
 
   network.on("stabilizationIterationsDone", () => {
     hideLoading();
-    // Turn off physics after stabilization to prevent jittering/lag
     if (viewMode !== 'local') {
+      // Disable physics to prevent jitter after stabilization
       network.setOptions({ physics: { enabled: false } });
     }
   });
@@ -1561,35 +1643,17 @@ function setupEventListeners() {
     }
   });
 
-  // Toggle physics simulation
-  let physicsEnabled = false;
-  document.getElementById("physics-btn").addEventListener("click", (e) => {
-    if (network) {
-      physicsEnabled = !physicsEnabled;
-      network.setOptions({ physics: { enabled: physicsEnabled } });
-
-      const icon = e.currentTarget.querySelector("i");
-      if (physicsEnabled) {
-        icon.className = "fa-solid fa-play";
-        e.currentTarget.style.color = "var(--accent)";
-      } else {
-        icon.className = "fa-solid fa-pause";
-        e.currentTarget.style.color = "var(--text-primary)";
-      }
-    }
-  });
-
   // Faculty filtering headers: Select All / Clear All
   document.getElementById("btn-select-all-faculties").addEventListener("click", () => {
     faculties.forEach(f => activeFaculties.add(f));
     document.querySelectorAll(".faculty-tag").forEach(tag => tag.classList.add("active"));
-    if (viewMode === 'faculty') renderGraph();
+    renderGraph();
   });
 
   document.getElementById("btn-clear-all-faculties").addEventListener("click", () => {
     activeFaculties.clear();
     document.querySelectorAll(".faculty-tag").forEach(tag => tag.classList.remove("active"));
-    if (viewMode === 'faculty') renderGraph();
+    renderGraph();
   });
 
   // Advanced Exam Filter Toggles
@@ -1667,6 +1731,116 @@ function setupEventListeners() {
       renderGraph();
     }
   });
+
+  // Toggle showing sports courses
+  document.getElementById("chk-show-sports").addEventListener("change", (e) => {
+    showSportsCourses = e.target.checked;
+    renderGraph();
+    if (selectedCourseCode) {
+      updateDetailsPanel();
+    }
+  });
+
+  // Open the Filtered Courses List Modal
+  document.getElementById("btn-open-list").addEventListener("click", () => {
+    const modal = document.getElementById("courses-list-modal");
+    const searchInput = document.getElementById("modal-search-input");
+    
+    modal.style.display = "flex";
+    searchInput.value = "";
+    populateModalCoursesTable("");
+    searchInput.focus();
+  });
+
+  // Close the Filtered Courses List Modal
+  document.getElementById("modal-close-btn").addEventListener("click", () => {
+    document.getElementById("courses-list-modal").style.display = "none";
+  });
+
+  // Close modal when clicking on the background overlay
+  document.getElementById("courses-list-modal").addEventListener("click", (e) => {
+    if (e.target.id === "courses-list-modal") {
+      document.getElementById("courses-list-modal").style.display = "none";
+    }
+  });
+
+  // Filter modal table dynamically as you type
+  document.getElementById("modal-search-input").addEventListener("input", (e) => {
+    populateModalCoursesTable(e.target.value);
+  });
+
+  // ── Branch Hiding ─────────────────────────────────────────────────────
+  // Context menu: hide-branch action
+  document.getElementById("ctx-hide-branch").addEventListener("click", () => {
+    const menu = document.getElementById("node-context-menu");
+    const nodeId = menu.dataset.nodeId;
+    if (nodeId) hideCourseBranch(nodeId);
+    hideNodeContextMenu();
+  });
+
+  // Reset all hidden branches
+  document.getElementById("btn-reset-all-hidden").addEventListener("click", resetAllHiddenBranches);
+
+  // Close context menu when clicking anywhere outside it
+  document.addEventListener("click", (e) => {
+    const menu = document.getElementById("node-context-menu");
+    if (!menu.contains(e.target)) hideNodeContextMenu();
+  });
+
+  // Close context menu on Escape key
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideNodeContextMenu();
+  });
+}
+
+// Populate the modal courses table based on search input
+function populateModalCoursesTable(query = "") {
+  const tableBody = document.getElementById("modal-courses-table-body");
+  const countSpan = document.getElementById("modal-courses-count");
+  tableBody.innerHTML = "";
+
+  const trimmedQuery = query.trim().toLowerCase();
+
+  // Filter list
+  const filtered = currentFilteredCourses.filter(course => {
+    if (!trimmedQuery) return true;
+    const code = (course.general["מספר מקצוע"] || "").toLowerCase();
+    const name = (course.general["שם מקצוע"] || "").toLowerCase();
+    return code.includes(trimmedQuery) || name.includes(trimmedQuery);
+  });
+
+  countSpan.textContent = filtered.length;
+
+  if (filtered.length === 0) {
+    const emptyRow = document.createElement("tr");
+    emptyRow.innerHTML = `<td colspan="4" style="text-align: center; color: var(--text-muted); padding: 24px;">אין קורסים תואמים לסינון</td>`;
+    tableBody.appendChild(emptyRow);
+    return;
+  }
+
+  filtered.forEach(course => {
+    const code = course.general["מספר מקצוע"];
+    const name = course.general["שם מקצוע"];
+    const fac = course.general["פקולטה"] || "";
+    const points = course.general["נקודות"] || "0";
+
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${code}</td>
+      <td><strong>${name}</strong></td>
+      <td>${fac}</td>
+      <td style="text-align: center;">${points}</td>
+    `;
+
+    row.addEventListener("click", () => {
+      // Select course in Graph and Sidebar
+      selectCourse(code);
+      // Close the modal popup
+      document.getElementById("courses-list-modal").style.display = "none";
+    });
+
+    tableBody.appendChild(row);
+  });
 }
 
 // Show/Hide loading screen
@@ -1679,4 +1853,290 @@ function showLoading(text) {
 function hideLoading() {
   const overlay = document.getElementById("loading-overlay");
   overlay.style.display = "none";
+}
+
+// ── Branch Hiding / Restore ──────────────────────────────────────────
+
+/**
+ * Build a vis.js node object for a course code using the same styling as
+ * generateGraphData. Returns null if the code is not in coursesMap and
+ * not in historicalCoursesInfo.
+ */
+function buildNodeObject(code) {
+  const isLightTheme = document.body.classList.contains("light-theme");
+  const isSelected   = code === selectedCourseCode;
+  const course       = coursesMap.get(code);
+
+  if (course) {
+    const fac  = course.general["פקולטה"];
+    const name = course.general["שם מקצוע"];
+    return {
+      id: code,
+      label: wrapText(name, 15),
+      title: `<b>${code}</b> - ${name}<br>${fac}<br>נקודות: ${course.general["נקודות"]}`,
+      color: {
+        background: isSelected ? hexToRgba(getFacultyColor(fac), 0.8) : hexToRgba(getFacultyColor(fac), isLightTheme ? 0.15 : 0.25),
+        border: isSelected ? (isLightTheme ? '#111827' : '#ffffff') : getFacultyColor(fac),
+        highlight: {
+          background: isSelected ? hexToRgba(getFacultyColor(fac), 0.9) : hexToRgba(getFacultyColor(fac), 0.45),
+          border: isLightTheme ? '#111827' : '#ffffff'
+        }
+      },
+      borderWidth: isSelected ? 3 : 2,
+      font: { size: isSelected ? 12 : 10, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' },
+      shadow: isSelected ? { enabled: true, color: isLightTheme ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.4)', size: 10 } : false
+    };
+  }
+
+  // Historical node
+  const hist = historicalCoursesInfo.get(code);
+  const isLT = document.body.classList.contains("light-theme");
+  if (hist) {
+    return {
+      id: code,
+      label: wrapText(hist.name, 15),
+      title: `<b>${code}</b> - ${hist.name}<br>${hist.faculty} (לא מוצע הסמסטר)<br>נקודות: ${hist.points}`,
+      color: { background: 'rgba(239,68,68,0.08)', border: '#ef4444', highlight: { background: 'rgba(239,68,68,0.2)', border: '#ef4444' } },
+      borderWidth: 1.5,
+      shapeProperties: { borderDashes: [3, 3] },
+      font: { color: isLT ? '#b91c1c' : '#fca5a5', size: 9.5 },
+      shadow: false
+    };
+  }
+
+  // Pure external node
+  return {
+    id: code,
+    label: code,
+    title: `<b>${code}</b><br>קורס חיצוני (לא מוצע הסמסטר)`,
+    color: { background: 'rgba(239, 68, 68, 0.08)', border: '#ef4444', highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' } },
+    borderWidth: 1.5,
+    shapeProperties: { borderDashes: [3, 3] },
+    font: { color: isLT ? '#b91c1c' : '#fca5a5', size: 9.5 },
+    shadow: false
+  };
+}
+
+/**
+ * Re-render the graph while preserving the camera viewport (position + zoom).
+ * Saves position/scale into pendingViewportRestore before re-rendering;
+ * stabilizationIterationsDone will apply it instead of the default fit().
+ * In local (hierarchical) view the layout always re-fits automatically so
+ * we skip saving.
+ */
+function renderGraphPreservingViewport() {
+  renderGraph();
+}
+
+/**
+ * Show the custom right-click context menu positioned near the cursor.
+ * Computes the branch size (selected node + all transitive unlocks) and
+ * displays that count so the user knows the scope before confirming.
+ */
+function showNodeContextMenu(nodeId, clientX, clientY) {
+  const menu = document.getElementById("node-context-menu");
+  const course = coursesMap.get(nodeId);
+  const name = course ? course.general["שם מקצוע"] : nodeId;
+
+  // Count how many courses will be hidden (root + transitive unlocks)
+  const unlockSet = getRecursiveUnlocks(nodeId);
+  const totalCount = 1 + unlockSet.size;
+
+  document.getElementById("ctx-hide-label").textContent =
+    `הסתר ענף — ${name.length > 22 ? name.slice(0, 22) + '…' : name} (${totalCount} קורסים)`;
+
+  menu.dataset.nodeId = nodeId;
+
+  // Position, clamping to viewport edges
+  menu.style.display = "block";
+  const menuW = menu.offsetWidth  || 220;
+  const menuH = menu.offsetHeight || 50;
+  const x = Math.min(clientX, window.innerWidth  - menuW - 8);
+  const y = Math.min(clientY, window.innerHeight - menuH - 8);
+  menu.style.left = x + "px";
+  menu.style.top  = y + "px";
+}
+
+/** Hide the context menu without taking action. */
+function hideNodeContextMenu() {
+  const menu = document.getElementById("node-context-menu");
+  menu.style.display = "none";
+  delete menu.dataset.nodeId;
+}
+
+/**
+ * Hide a branch in-place: directly removes the targeted nodes and their
+ * connected edges from the live vis.js DataSets without triggering a full
+ * re-render. The viewport, physics state, and all other node positions are
+ * completely untouched.
+ */
+function hideCourseBranch(rootCode) {
+  const unlockSet = getRecursiveUnlocks(rootCode);
+  const codes = new Set([rootCode, ...unlockSet]);
+
+  codes.forEach(c => hiddenCourses.add(c));
+
+  const rootCourse = coursesMap.get(rootCode);
+  const rootName   = rootCourse ? rootCourse.general["שם מקצוע"] : rootCode;
+  hiddenBranches.push({ root: rootCode, rootName, codes });
+
+  if (networkNodes && networkEdges) {
+    // Remove edges first (edge IDs are deterministic: "from->to")
+    const edgeIdsToRemove = [];
+    networkEdges.forEach(edge => {
+      if (codes.has(edge.from) || codes.has(edge.to)) {
+        edgeIdsToRemove.push(edge.id);
+      }
+    });
+    if (edgeIdsToRemove.length) networkEdges.remove(edgeIdsToRemove);
+
+    // Remove the nodes themselves, but save their coordinates first
+    const nodeIdsToRemove = Array.from(codes).filter(c => networkNodes.get(c) !== null);
+    if (nodeIdsToRemove.length) {
+      const positions = network.getPositions(nodeIdsToRemove);
+      for (const id in positions) {
+        hiddenNodePositions[id] = positions[id];
+      }
+      networkNodes.remove(nodeIdsToRemove);
+    }
+  }
+
+  // Keep the filtered-courses cache in sync for the popup list
+  currentFilteredCourses = currentFilteredCourses.filter(
+    c => !codes.has(c.general["מספר מקצוע"])
+  );
+
+  updateHiddenBranchesPanel();
+}
+
+/**
+ * Restore a previously hidden branch in-place: adds node + edge objects
+ * directly into the live vis.js DataSets, then enables physics briefly so
+ * the new nodes settle near their neighbours without moving existing ones.
+ */
+function restoreCourseBranch(rootCode) {
+  const idx = hiddenBranches.findIndex(b => b.root === rootCode);
+  if (idx === -1) return;
+  const branch = hiddenBranches.splice(idx, 1)[0];
+
+  // Rebuild hiddenCourses from remaining branches
+  hiddenCourses.clear();
+  hiddenBranches.forEach(b => b.codes.forEach(c => hiddenCourses.add(c)));
+
+  _addBranchToDataset(branch.codes);
+  updateHiddenBranchesPanel();
+
+  // Also refresh the filtered-courses cache
+  refreshCurrentFilteredCourses();
+}
+
+/** Remove all hidden branches and add all nodes back in-place. */
+function resetAllHiddenBranches() {
+  const allCodes = new Set(hiddenCourses); // snapshot before clearing
+  hiddenCourses.clear();
+  hiddenBranches = [];
+
+  _addBranchToDataset(allCodes);
+  updateHiddenBranchesPanel();
+
+  refreshCurrentFilteredCourses();
+}
+
+/**
+ * Internal helper: given a Set of course codes, add any that are currently
+ * absent from networkNodes (pass all active filters) back into the DataSets,
+ * then run physics briefly to let them settle.
+ */
+function _addBranchToDataset(codes) {
+  if (!networkNodes || !networkEdges || !network) return;
+
+  const isLightTheme = document.body.classList.contains("light-theme");
+  const nodesToAdd   = [];
+  const edgesToAdd   = [];
+  const addedEdges   = new Set(
+    networkEdges.map(e => e.id)
+  );
+
+  codes.forEach(code => {
+    // Only restore if it now passes all active filters
+    const course = coursesMap.get(code);
+    if (course && !courseMatchesFilters(course)) return;
+
+    // Skip if already visible
+    if (networkNodes.get(code) !== null) return;
+
+    const nodeObj = buildNodeObject(code);
+    if (nodeObj) {
+      if (hiddenNodePositions[code]) {
+        nodeObj.x = hiddenNodePositions[code].x;
+        nodeObj.y = hiddenNodePositions[code].y;
+      }
+      nodesToAdd.push(nodeObj);
+    }
+  });
+
+  if (nodesToAdd.length === 0) return;
+
+  networkNodes.add(nodesToAdd);
+
+  // Now wire up edges between all currently visible nodes + newly added ones
+  const visibleNodes = new Set(networkNodes.map(n => n.id));
+
+  visibleNodes.forEach(code => {
+    const prereqs = adjList.get(code);
+    if (prereqs) {
+      prereqs.forEach(pre => {
+        if (visibleNodes.has(pre)) {
+          const edgeId = `${pre}->${code}`;
+          if (!addedEdges.has(edgeId)) {
+            const isSelectedPath = (pre === selectedCourseCode || code === selectedCourseCode);
+            edgesToAdd.push({
+              id: edgeId,
+              from: pre,
+              to: code,
+              color: isSelectedPath ? '#8b5cf6' : (isLightTheme ? 'rgba(124,58,237,0.35)' : 'rgba(139,92,246,0.35)'),
+              width: isSelectedPath ? 2.5 : 1.2,
+              arrows: { to: { enabled: true, scaleFactor: 0.6 } }
+            });
+            addedEdges.add(edgeId);
+          }
+        }
+      });
+    }
+  });
+
+  if (edgesToAdd.length) networkEdges.add(edgesToAdd);
+}
+
+/**
+ * Sync the left-panel "ענפים מוסתרים" section to the current hiddenBranches array.
+ * Shows the panel when there is at least one hidden branch; hides it otherwise.
+ */
+function updateHiddenBranchesPanel() {
+  const group = document.getElementById("hidden-branches-group");
+  const list  = document.getElementById("hidden-branches-list");
+
+  if (hiddenBranches.length === 0) {
+    group.style.display = "none";
+    return;
+  }
+
+  group.style.display = "block";
+  list.innerHTML = "";
+
+  hiddenBranches.forEach(branch => {
+    const item = document.createElement("div");
+    item.className = "hidden-branch-item";
+    item.innerHTML = `
+      <span class="hidden-branch-name" title="${branch.rootName}">${branch.rootName}</span>
+      <span class="hidden-branch-count">(${branch.codes.size})</span>
+      <button class="restore-branch-btn" title="שחזר ענף">
+        <i class="fa-solid fa-rotate-left"></i> שחזר
+      </button>
+    `;
+    item.querySelector(".restore-branch-btn").addEventListener("click", () => {
+      restoreCourseBranch(branch.root);
+    });
+    list.appendChild(item);
+  });
 }
