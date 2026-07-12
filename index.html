@@ -146,6 +146,32 @@
                   <span>הצג דרישות קדם חיצוניות (לא מוצעות)</span>
                 </label>
               </div>
+
+              <!-- Sports Courses Filter -->
+              <div class="filter-group" style="margin-top: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">
+                <label class="switch-container" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: var(--text-secondary); font-weight: 600;">
+                  <input type="checkbox" id="chk-show-sports" style="cursor: pointer; width: 14px; height: 14px;">
+                  <span>הצג קורסי ספורט</span>
+                </label>
+              </div>
+
+              <!-- Hidden Branches Panel (shown only when branches are hidden) -->
+              <div id="hidden-branches-group" style="display:none; margin-top:12px; border-top:1px solid var(--border-color); padding-top:10px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+                  <span style="font-size:12px; font-weight:700; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+                    <i class="fa-solid fa-eye-slash" style="color:#f97316;"></i>
+                    ענפים מוסתרים
+                  </span>
+                  <button id="btn-reset-all-hidden" class="reset-hidden-btn" title="שחזר את כל הענפים המוסתרים">אפס הכל</button>
+                </div>
+                <div id="hidden-branches-list"></div>
+              </div>
+
+
+              <button class="list-courses-btn" id="btn-open-list" title="הצג רשימה מלאה של כל הקורסים התואמים לסינון הנוכחי">
+                <i class="fa-solid fa-list-ul"></i>
+                <span>רשימת קורסים מסוננים</span>
+              </button>
             </div>
           </div>
         </div>
@@ -165,7 +191,6 @@
           <button class="control-btn" id="zoom-in-btn" title="התקרב"><i class="fa-solid fa-plus"></i></button>
           <button class="control-btn" id="zoom-out-btn" title="התרחק"><i class="fa-solid fa-minus"></i></button>
           <button class="control-btn" id="fit-btn" title="התאם למסך"><i class="fa-solid fa-expand"></i></button>
-          <button class="control-btn" id="physics-btn" title="עצור/הפעל סימולציית גרף" style="color: var(--text-primary);"><i class="fa-solid fa-pause"></i></button>
         </div>
         
         <!-- Floating Legend -->
@@ -184,6 +209,48 @@
         
       </main>
       
+    </div>
+  </div>
+
+  <!-- Popup Modal for Filtered Courses List -->
+  <div class="modal-overlay" id="courses-list-modal" style="display: none;">
+    <div class="modal-card animate-slide-up">
+      <div class="modal-header">
+        <div class="modal-header-title">
+          <i class="fa-solid fa-graduation-cap"></i>
+          <h3>קורסים העונים לסינון (<span id="modal-courses-count">0</span>)</h3>
+        </div>
+        <button class="modal-close-btn" id="modal-close-btn" title="סגור">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-search-wrapper">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <input type="text" id="modal-search-input" placeholder="חיפוש לפי מספר קורס או שם...">
+        </div>
+        <div class="modal-list-container">
+          <table class="modal-courses-table">
+            <thead>
+              <tr>
+                <th>מספר קורס</th>
+                <th>שם קורס</th>
+                <th>פקולטה</th>
+                <th style="text-align: center;">נקודות</th>
+              </tr>
+            </thead>
+            <tbody id="modal-courses-table-body">
+              <!-- Populated dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right-Click Node Context Menu -->
+  <div id="node-context-menu" class="node-context-menu" style="display:none;" role="menu">
+    <div class="context-menu-item" id="ctx-hide-branch" role="menuitem" tabindex="0">
+      <i class="fa-solid fa-eye-slash"></i>
+      <span id="ctx-hide-label">הסתר ענף</span>
     </div>
   </div>
 
