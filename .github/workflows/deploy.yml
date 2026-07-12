@@ -43,10 +43,17 @@ jobs:
             echo "::add-mask::$PROXY_SERVER"
             PROXY_ARG="--proxy-server=$PROXY_SERVER"
           fi
+          # Ensure the data directory exists in the deployment branch
+          mkdir -p ./gh-pages/data
+          # Copy the latest UI files from main branch to the deployment branch
+          cp ./main/index.html ./gh-pages/
+          cp ./main/app.js ./gh-pages/
+          cp ./main/style.css ./gh-pages/
+          # Run the scraper, outputting all course details and semester lists directly into the data folder
           python -u ./main/courses_to_json.py last-8 \
-            './gh-pages/courses_{year}_{semester}.json' \
-            --min-js-output-file='./gh-pages/courses_{year}_{semester}.min.js' \
-            --last-semesters-output-file './gh-pages/last_semesters.json' \
+            './gh-pages/data/courses_{year}_{semester}.json' \
+            --min-js-output-file='./gh-pages/data/courses_{year}_{semester}.min.js' \
+            --last-semesters-output-file './gh-pages/data/last_semesters.json' \
             --run-postprocessing \
             $PROXY_ARG
       - name: Deploy
