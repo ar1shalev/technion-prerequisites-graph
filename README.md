@@ -97,9 +97,9 @@ pip install requests tqdm
 ```
 
 ### 2. Fetch and Re-generate Semester Files
-Run the scraper script with the `last-N` option. This will query the Technion servers for the active semesters list, create the select index, and pull course details for the last `N` semesters (we recommend pulling `8` semesters to cover a 3-year history, including Winter, Spring, and Summer terms):
+Run the scraper script with the `last-N` option. This will query the Technion servers for the active semesters list, create the select index, and pull course details for the last `N` semesters (we recommend pulling `24` semesters to cover an 8-year history, including Winter, Spring, and Summer terms):
 ```bash
-python3 courses_to_json.py last-8 "data/courses_{year}_{semester}.json" --last-semesters-output-file "data/last_semesters.json"
+python3 courses_to_json.py last-24 "data/courses_{year}_{semester}.json" --last-semesters-output-file "data/last_semesters.json"
 ```
 
 The script will:

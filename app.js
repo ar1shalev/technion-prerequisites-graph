@@ -12,7 +12,24 @@ let courseSemestersMap = new Map(); // code -> Set of semesters
 let showAllHistoricalCourses = false;
 let showExternalCourses = false;
 let showSportsCourses = false;
+let showSupportingPrereqs = true;
+let useHierarchicalLayout = false;
+let useCompression = false;
+let baseNodeFontSize = 10;
 let currentFilteredCourses = []; // courses that match criteria, excluding prereqs
+let modalDependencyFilter = "all"; // 'all', 'prereqs', 'unlocks'
+let savedView = null; // Stores position and scale before re-rendering
+let baselinePositions = null; // Stores original coordinates of nodes before compression
+
+function saveCurrentView() {
+  if (network) {
+    savedView = {
+      position: network.getViewPosition(),
+      scale: network.getScale()
+    };
+  }
+}
+
 let historicalCoursesInfo = new Map(); // code -> { name, faculty, points }
 
 // Branch Hiding State
@@ -96,11 +113,7 @@ async function loadAllSemestersIndex() {
 
               // Cache historical course info
               if (!historicalCoursesInfo.has(code)) {
-                historicalCoursesInfo.set(code, {
-                  name: course.general["שם מקצוע"],
-                  faculty: course.general["פקולטה"],
-                  points: course.general["נקודות"]
-                });
+                historicalCoursesInfo.set(code, course);
               }
             }
           });
@@ -111,7 +124,12 @@ async function loadAllSemestersIndex() {
     });
 
     await Promise.all(promises);
-    // If a course is currently selected, refresh details to display its semesters
+    
+    // Rebuild graph now that we have all historical courses, to include their prerequisites in the global adjacency list
+    buildGraph();
+    renderGraph();
+    
+    // If a course is currently selected, refresh details to display its semesters and new unlocks
     if (selectedCourseCode) {
       updateDetailsPanel();
     }
@@ -170,16 +188,17 @@ async function loadSemesterData(semesterVal) {
     buildGraph();
     populateFacultiesPanel();
 
-    // Clear search and selection on semester change
-    document.getElementById("course-search").value = "";
-    document.getElementById("clear-search-btn").style.display = "none";
-    selectedCourseCode = null;
-
     // Clear hidden branches state
     hiddenCourses.clear();
     hiddenBranches = [];
     hiddenNodePositions = {};
     updateHiddenBranchesPanel();
+
+    // Preserve selection, but update details for the new semester
+    if (selectedCourseCode) {
+      document.getElementById("course-search").value = coursesMap.has(selectedCourseCode) ? coursesMap.get(selectedCourseCode).general["שם מקצוע"] : (historicalCoursesInfo.get(selectedCourseCode)?.general["שם מקצוע"] || selectedCourseCode);
+      document.getElementById("clear-search-btn").style.display = "block";
+    }
 
     updateDetailsPanel();
 
@@ -245,16 +264,18 @@ function buildGraph() {
   revAdjList.clear();
   coReqList.clear();
 
-// Initialize lists for all known courses
-for (const code of coursesMap.keys()) {
-  adjList.set(code, new Set());
-  revAdjList.set(code, new Set());
-  coReqList.set(code, new Set());
-}
+  // Initialize lists for all known courses across all semesters
+  const allKnownCourses = new Map([...historicalCoursesInfo.entries(), ...coursesMap.entries()]);
 
-// Populate lists
-for (const [code, course] of coursesMap.entries()) {
-  const gen = course.general;
+  for (const code of allKnownCourses.keys()) {
+    adjList.set(code, new Set());
+    revAdjList.set(code, new Set());
+    coReqList.set(code, new Set());
+  }
+
+  // Populate lists
+  for (const [code, course] of allKnownCourses.entries()) {
+    const gen = course.general;
 
   // Prerequisites
   const prereqStr = gen["מקצועות קדם"];
@@ -340,6 +361,7 @@ function populateFacultiesPanel() {
       }
       tag.classList.toggle("active");
 
+      saveCurrentView();
       renderGraph();
     });
 
@@ -589,18 +611,10 @@ function refreshCurrentFilteredCourses() {
   if (showAllHistoricalCourses) {
     for (const [code, hist] of historicalCoursesInfo.entries()) {
       if (!coursesMap.has(code)) {
-        const mockCourse = {
-          general: {
-            "מספר מקצוע": code,
-            "שם מקצוע": hist.name,
-            "פקולטה": hist.faculty,
-            "נקודות": hist.points
-          },
-          schedule: [],
-          isHistorical: true
-        };
-        if (courseMatchesFilters(mockCourse)) {
-          currentFilteredCourses.push(mockCourse);
+        const histCourse = JSON.parse(JSON.stringify(hist)); // Deep copy to avoid mutating cache
+        histCourse.isHistorical = true;
+        if (courseMatchesFilters(histCourse)) {
+          currentFilteredCourses.push(histCourse);
         }
       }
     }
@@ -631,27 +645,24 @@ function generateGraphData() {
         filteredRelevantNodes.add(code);
         return;
       }
-      let course = coursesMap.get(code);
-      if (!course) {
-        if (historicalCoursesInfo.has(code)) {
-          const hist = historicalCoursesInfo.get(code);
-          course = {
-            general: { "מספר מקצוע": code, "שם מקצוע": hist.name, "פקולטה": hist.faculty, "נקודות": hist.points },
-            schedule: [],
-            isHistorical: true
-          };
-        } else if (showExternalCourses) {
-          filteredRelevantNodes.add(code);
-          return;
-        } else {
-          return;
-        }
+      if (hiddenCourses.has(code)) return; // Still honor manual hiding
+
+      const course = coursesMap.get(code) || historicalCoursesInfo.get(code);
+      const isPureExternal = !course;
+      const isHist = course && !coursesMap.has(code);
+
+      if (isPureExternal && !showExternalCourses) return;
+      if (isHist && !showAllHistoricalCourses) return;
+
+      if (isPureExternal) {
+        filteredRelevantNodes.add(code);
+        return;
       }
 
-      if (courseMatchesFilters(course)) {
-        if (!course.isHistorical || showAllHistoricalCourses || showExternalCourses) {
-          filteredRelevantNodes.add(code);
-        }
+      const tempCourse = isHist ? { general: course.general, isHistorical: true } : course;
+      
+      if (courseMatchesFilters(tempCourse)) {
+        filteredRelevantNodes.add(code);
       }
     });
 
@@ -660,19 +671,18 @@ function generateGraphData() {
       const course = coursesMap.get(code);
       const isSelected = code === selectedCourseCode;
 
-      if (!course && !isSelected && !showExternalCourses) {
-        return;
-      }
-
       let labelText = code;
       if (course) {
         labelText = wrapText(course.general["שם מקצוע"], 15);
+      } else {
+        const hist = historicalCoursesInfo.get(code);
+        if (hist) labelText = wrapText(hist.general["שם מקצוע"], 15);
       }
 
       let nodeObj = {
         id: code,
         label: labelText,
-        font: { size: isSelected ? 12 : 10, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' }
+        font: { size: isSelected ? (baseNodeFontSize + 2) : baseNodeFontSize, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' }
       };
 
       if (course) {
@@ -706,7 +716,7 @@ function generateGraphData() {
         };
         nodeObj.borderWidth = 1.5;
         nodeObj.shapeProperties = { borderDashes: [3, 3] };
-        nodeObj.font = { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: 9.5 };
+        nodeObj.font = { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 };
       }
 
       nodes.push(nodeObj);
@@ -788,7 +798,7 @@ function generateGraphData() {
             }
           },
           borderWidth: isSelected ? 3 : 2, // Thicker solid border for offered course
-          font: { size: isSelected ? 12 : 10, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' },
+          font: { size: isSelected ? (baseNodeFontSize + 2) : baseNodeFontSize, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' },
           shadow: isSelected ? { enabled: true, color: isLightTheme ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.4)', size: 10 } : false
         };
 
@@ -798,12 +808,12 @@ function generateGraphData() {
         // It's a historical course (not offered this semester)
         const hist = historicalCoursesInfo.get(code);
         if (hist) {
-          const fac = hist.faculty;
-          const name = hist.name;
+          const fac = hist.general["פקולטה"];
+          const name = hist.general["שם מקצוע"];
           const nodeObj = {
             id: code,
             label: wrapText(name, 15),
-            title: `<b>${code}</b> - ${name}<br>${fac} (לא מוצע הסמסטר)<br>נקודות: ${hist.points}`,
+            title: `<b>${code}</b> - ${name}<br>${fac} (לא מוצע הסמסטר)<br>נקודות: ${hist.general["נקודות"]}`,
             color: {
               background: 'rgba(239, 68, 68, 0.08)', // transparent red
               border: '#ef4444', // bright red
@@ -811,7 +821,7 @@ function generateGraphData() {
             },
             borderWidth: 1.5,
             shapeProperties: { borderDashes: [3, 3] },
-            font: { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: 9.5 },
+            font: { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 },
             shadow: isSelected ? { enabled: true, color: isLightTheme ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.4)', size: 10 } : false
           };
           nodes.push(nodeObj);
@@ -822,56 +832,58 @@ function generateGraphData() {
 
 
     // Expand graph to include direct requisites from other faculties (User feedback!)
-    coreCourses.forEach(code => {
-      const prereqs = adjList.get(code) || new Set();
-      prereqs.forEach(pre => {
-        if (!addedNodes.has(pre)) {
-          // pre is in another faculty (supporting node)
-          const course = coursesMap.get(pre);
-          if (!course && !showExternalCourses) {
-            return;
-          }
-          let nodeObj = {
-            id: pre,
-            borderWidth: 1.5,
-            font: { size: 9.5 }
-          };
-
-          if (course) {
-            const fac = course.general["פקולטה"];
-            nodeObj.label = wrapText(course.general["שם מקצוע"], 15);
-            nodeObj.title = `<b>${pre}</b> - ${course.general["שם מקצוע"]}<br>${fac} (דרישת קדם תומכת)<br>נקודות: ${course.general["נקודות"]}`;
-            // Supporting node style: dark background, dashed colored border, muted text
-            nodeObj.color = {
-              background: isLightTheme ? 'rgba(240, 240, 245, 0.95)' : 'rgba(10, 10, 15, 0.95)',
-              border: getFacultyColor(fac),
-              highlight: { 
-                background: isLightTheme ? 'rgba(230, 230, 235, 0.95)' : 'rgba(20, 20, 25, 0.95)', 
-                border: isLightTheme ? '#111827' : '#ffffff' 
-              }
+    if (showSupportingPrereqs) {
+      coreCourses.forEach(code => {
+        const prereqs = adjList.get(code) || new Set();
+        prereqs.forEach(pre => {
+          if (!addedNodes.has(pre)) {
+            // pre is in another faculty (supporting node)
+            const course = coursesMap.get(pre);
+            if (!course && !showExternalCourses) {
+              return;
+            }
+            let nodeObj = {
+              id: pre,
+              borderWidth: 1.5,
+              font: { size: baseNodeFontSize - 0.5 }
             };
-            nodeObj.borderWidth = 2;
-            nodeObj.shapeProperties = { borderDashes: [4, 4] };
-            nodeObj.font = { color: isLightTheme ? '#4b5563' : '#a1a1aa', size: 9.5 };
-          } else {
-            // External node - Colored Red
-            nodeObj.label = pre;
-            nodeObj.title = `<b>${pre}</b><br>קורס חיצוני (לא מוצע הסמסטר)`;
-            nodeObj.color = {
-              background: 'rgba(239, 68, 68, 0.08)',
-              border: '#ef4444',
-              highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' }
-            };
-            nodeObj.borderWidth = 1.5;
-            nodeObj.shapeProperties = { borderDashes: [3, 3] };
-            nodeObj.font = { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: 9.5 };
-          }
 
-          nodes.push(nodeObj);
-          addedNodes.add(pre);
-        }
+            if (course) {
+              const fac = course.general["פקולטה"];
+              nodeObj.label = wrapText(course.general["שם מקצוע"], 15);
+              nodeObj.title = `<b>${pre}</b> - ${course.general["שם מקצוע"]}<br>${fac} (דרישת קדם תומכת)<br>נקודות: ${course.general["נקודות"]}`;
+              // Supporting node style: dark background, dashed colored border, muted text
+              nodeObj.color = {
+                background: isLightTheme ? 'rgba(240, 240, 245, 0.95)' : 'rgba(10, 10, 15, 0.95)',
+                border: getFacultyColor(fac),
+                highlight: { 
+                  background: isLightTheme ? 'rgba(230, 230, 235, 0.95)' : 'rgba(20, 20, 25, 0.95)', 
+                  border: isLightTheme ? '#111827' : '#ffffff' 
+                }
+              };
+              nodeObj.borderWidth = 2;
+              nodeObj.shapeProperties = { borderDashes: [4, 4] };
+              nodeObj.font = { color: isLightTheme ? '#4b5563' : '#a1a1aa', size: baseNodeFontSize - 0.5 };
+            } else {
+              // External node - Colored Red
+              nodeObj.label = pre;
+              nodeObj.title = `<b>${pre}</b><br>קורס חיצוני (לא מוצע הסמסטר)`;
+              nodeObj.color = {
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '#ef4444',
+                highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' }
+              };
+              nodeObj.borderWidth = 1.5;
+              nodeObj.shapeProperties = { borderDashes: [3, 3] };
+              nodeObj.font = { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 };
+            }
+
+            nodes.push(nodeObj);
+            addedNodes.add(pre);
+          }
+        });
       });
-    });
+    }
 
     // Create edges between all added nodes
     addedNodes.forEach(code => {
@@ -925,6 +937,7 @@ function generateGraphData() {
 
 // Render Graph using Vis.js
 function renderGraph() {
+  baselinePositions = null;
   const container = document.getElementById("network-canvas");
   const { nodes, edges } = generateGraphData();
 
@@ -949,9 +962,9 @@ function renderGraph() {
         updateInterval: 25
       },
       barnesHut: {
-        gravitationalConstant: -12000,
+        gravitationalConstant: useCompression ? -6000 : -12000,
         centralGravity: 0.1,
-        springLength: 220,
+        springLength: useCompression ? 120 : 220,
         springConstant: 0.02,
         damping: 0.09,
         avoidOverlap: 1
@@ -972,6 +985,13 @@ function renderGraph() {
       font: {
         face: 'Heebo, Outfit, sans-serif',
         color: '#ffffff'
+      },
+      scaling: {
+        label: {
+          enabled: true,
+          drawThreshold: 1,
+          maxVisible: 1000
+        }
       }
     },
     interaction: {
@@ -982,15 +1002,15 @@ function renderGraph() {
     }
   };
 
-  // Use Hierarchical Layout for Local Centric Graph
-  if (viewMode === 'local') {
+  // Use Hierarchical Layout for Local Centric Graph or custom hierarchical layout
+  if (viewMode === 'local' || useHierarchicalLayout) {
     options.physics = { enabled: false }; // Disable simulation for hierarchy
     options.layout = {
       hierarchical: {
         direction: 'UD', // Up-Down (top to bottom)
         sortMethod: 'directed',
-        nodeSpacing: 220,
-        levelSeparation: 180,
+        nodeSpacing: useCompression ? 130 : 220,
+        levelSeparation: useCompression ? 110 : 180,
         shakeTowards: 'leaves'
       }
     };
@@ -1029,16 +1049,37 @@ function renderGraph() {
 
   network.on("stabilizationIterationsDone", () => {
     hideLoading();
-    if (viewMode !== 'local') {
+    if (viewMode !== 'local' && !useHierarchicalLayout) {
       // Disable physics to prevent jitter after stabilization
       network.setOptions({ physics: { enabled: false } });
+    }
+    baselinePositions = network.getPositions();
+    applyCompression();
+    if (savedView) {
+      network.moveTo({
+        position: savedView.position,
+        scale: savedView.scale,
+        animation: false
+      });
+      savedView = null;
     }
   });
 
   // Trigger fit to screen on loaded
-  if (viewMode === 'local') {
+  if (viewMode === 'local' || useHierarchicalLayout) {
     setTimeout(() => {
-      network.fit({ animation: true });
+      baselinePositions = network.getPositions();
+      applyCompression();
+      if (savedView) {
+        network.moveTo({
+          position: savedView.position,
+          scale: savedView.scale,
+          animation: false
+        });
+        savedView = null;
+      } else {
+        network.fit({ animation: true });
+      }
     }, 150);
   }
 
@@ -1087,6 +1128,8 @@ function unselectCourse() {
     viewMode = 'faculty';
     document.getElementById("btn-view-faculty").classList.add("active");
     document.getElementById("btn-view-local").classList.remove("active");
+    restoreFacultyFilters();
+    updateLayoutToggleBtnVisibility();
   }
   renderGraph();
   updateDetailsPanel();
@@ -1146,15 +1189,15 @@ function updateDetailsPanel() {
     return;
   }
 
-  const course = coursesMap.get(selectedCourseCode);
-  const isExternal = !course;
+  const course = coursesMap.get(selectedCourseCode) || historicalCoursesInfo.get(selectedCourseCode);
+  const isOfferedThisSemester = coursesMap.has(selectedCourseCode);
 
-  if (isExternal) {
-    const hist = historicalCoursesInfo.get(selectedCourseCode);
-    const facultyColor = hist ? getFacultyColor(hist.faculty) : "#4b5563";
-    const titleText = hist ? hist.name : "קורס חיצוני";
-    const facText = hist ? hist.faculty : "חיצוני";
-    const ptsText = hist ? hist.points : "לא ידוע";
+  if (!course) {
+    // Pure external (not even historical)
+    const facultyColor = "#4b5563";
+    const titleText = "קורס חיצוני";
+    const facText = "חיצוני";
+    const ptsText = "לא ידוע";
 
     const offeredSems = courseSemestersMap.get(selectedCourseCode);
     const semsText = offeredSems ? Array.from(offeredSems).join(", ") : "לא נמצאו סמסטרים";
@@ -1180,7 +1223,7 @@ function updateDetailsPanel() {
           </div>
         </div>
         <p style="font-size: 13px; color: var(--text-secondary); margin-top: 15px; line-height: 1.4;">
-          הקורס אינו מועבר בסמסטר הנוכחי שנבחר, אך תוכל לראות למעלה באילו סמסטרים הוא מוצע בדרך כלל.
+          קורס זה לא הוצע בטכניון בשלוש השנים האחרונות או שהוא קורס חיצוני.
         </p>
         <div class="card-actions" style="display: flex; gap: 8px; margin-top: 10px;">
           <button class="btn btn-primary" onclick="toggleLocalView(true)" style="width: 100%;">
@@ -1216,12 +1259,6 @@ function updateDetailsPanel() {
   let displayRecPrereqs = recursivePrereqs;
   let displayRecUnlocks = recursiveUnlocks;
 
-  if (!showExternalCourses) {
-    displayPrereqs = directPrereqs.filter(code => coursesMap.has(code));
-    displayUnlocks = directUnlocks.filter(code => coursesMap.has(code));
-    displayRecPrereqs = recursivePrereqs.filter(code => coursesMap.has(code));
-    displayRecUnlocks = recursiveUnlocks.filter(code => coursesMap.has(code));
-  }
 
   // Determine if course has a final exam
   const hasExam = (gen["מועד א"] || gen["מועד ב"]) ? "כן" : "לא";
@@ -1395,85 +1432,87 @@ function updateDetailsPanel() {
     </div>
   `;
 
-  // Exam Dates (if present)
-  const examsList = [
-    { name: "מועד א'", key: "מועד א" },
-    { name: "מועד ב'", key: "מועד ב" },
-    { name: "בוחן א'", key: "בוחן מועד א" },
-    { name: "בוחן ב'", key: "בוחן מועד ב" }
-  ].filter(ex => gen[ex.key]);
+  if (isOfferedThisSemester) {
+    // Exam Dates (if present)
+    const examsList = [
+      { name: "מועד א'", key: "מועד א" },
+      { name: "מועד ב'", key: "מועד ב" },
+      { name: "בוחן א'", key: "בוחן מועד א" },
+      { name: "בוחן ב'", key: "בוחן מועד ב" }
+    ].filter(ex => gen[ex.key]);
 
-  if (examsList.length > 0) {
-    html += `
-      <div class="info-section collapsed">
-        <div class="info-section-header" onclick="toggleSection(this)">
-          <span class="info-section-title">
-            <i class="fa-solid fa-calendar-days"></i> לוח בחינות
-          </span>
-          <i class="fa-solid fa-chevron-up chevron"></i>
-        </div>
-        <div class="info-section-content">
-          <table class="exams-table">
-            <thead>
-              <tr>
-                <th>מועד</th>
-                <th>תאריך ושעה</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${examsList.map(ex => `
+    if (examsList.length > 0) {
+      html += `
+        <div class="info-section collapsed">
+          <div class="info-section-header" onclick="toggleSection(this)">
+            <span class="info-section-title">
+              <i class="fa-solid fa-calendar-days"></i> לוח בחינות
+            </span>
+            <i class="fa-solid fa-chevron-up chevron"></i>
+          </div>
+          <div class="info-section-content">
+            <table class="exams-table">
+              <thead>
                 <tr>
-                  <td style="font-weight: 500;">${ex.name}</td>
-                  <td class="exam-date-cell">${gen[ex.key]}</td>
+                  <th>מועד</th>
+                  <th>תאריך ושעה</th>
                 </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
-  }
-
-  // Lectures & Tutorials Schedules (if present)
-  const schedule = course.schedule;
-  if (schedule && schedule.length > 0) {
-    // Group schedule items by group code/lecturer/type
-    html += `
-      <div class="info-section collapsed">
-        <div class="info-section-header" onclick="toggleSection(this)">
-          <span class="info-section-title">
-            <i class="fa-solid fa-clock"></i> שעות הרצאות ותרגולים
-          </span>
-          <i class="fa-solid fa-chevron-up chevron"></i>
-        </div>
-        <div class="info-section-content">
-          <div class="schedules-container">
-            ${schedule.map(item => `
-              <div class="schedule-card">
-                <div class="schedule-header">
-                  <span>קבוצה ${item["קבוצה"]} (${item["סוג"]})</span>
-                  <span>מס. ${item["מס."]}</span>
-                </div>
-                <div class="schedule-row">
-                  <span class="schedule-label">יום ושעה</span>
-                  <span class="schedule-val-time">יום ${item["יום"]}, ${item["שעה"]}</span>
-                </div>
-                <div class="schedule-row">
-                  <span class="schedule-label">מיקום</span>
-                  <span>${item["בניין"] ? `${item["בניין"]}, חדר ${item["חדר"]}` : 'לא צוין מיקום'}</span>
-                </div>
-                ${item["מרצה/מתרגל"] ? `
-                  <div class="schedule-row">
-                    <span class="schedule-label">סגל</span>
-                    <span style="font-size:12px;">${item["מרצה/מתרגל"].replace(/\n/g, ', ')}</span>
-                  </div>
-                ` : ''}
-              </div>
-            `).join('')}
+              </thead>
+              <tbody>
+                ${examsList.map(ex => `
+                  <tr>
+                    <td style="font-weight: 500;">${ex.name}</td>
+                    <td class="exam-date-cell">${gen[ex.key]}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
           </div>
         </div>
-      </div>
-    `;
+      `;
+    }
+
+    // Lectures & Tutorials Schedules (if present)
+    const schedule = course.schedule;
+    if (schedule && schedule.length > 0) {
+      // Group schedule items by group code/lecturer/type
+      html += `
+        <div class="info-section collapsed">
+          <div class="info-section-header" onclick="toggleSection(this)">
+            <span class="info-section-title">
+              <i class="fa-solid fa-clock"></i> שעות הרצאות ותרגולים
+            </span>
+            <i class="fa-solid fa-chevron-up chevron"></i>
+          </div>
+          <div class="info-section-content">
+            <div class="schedules-container">
+              ${schedule.map(item => `
+                <div class="schedule-card">
+                  <div class="schedule-header">
+                    <span>קבוצה ${item["קבוצה"]} (${item["סוג"]})</span>
+                    <span>מס. ${item["מס."]}</span>
+                  </div>
+                  <div class="schedule-row">
+                    <span class="schedule-label">יום ושעה</span>
+                    <span class="schedule-val-time">יום ${item["יום"]}, ${item["שעה"]}</span>
+                  </div>
+                  <div class="schedule-row">
+                    <span class="schedule-label">מיקום</span>
+                    <span>${item["בניין"] ? `${item["בניין"]}, חדר ${item["חדר"]}` : 'לא צוין מיקום'}</span>
+                  </div>
+                  ${item["מרצה/מתרגל"] ? `
+                    <div class="schedule-row">
+                      <span class="schedule-label">סגל</span>
+                      <span style="font-size:12px;">${item["מרצה/מתרגל"].replace(/\n/g, ', ')}</span>
+                    </div>
+                  ` : ''}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
   }
 
   container.innerHTML = html;
@@ -1482,7 +1521,15 @@ function updateDetailsPanel() {
 // Render small link card for prereqs/unlocks lists
 function renderReqLink(code) {
   const target = coursesMap.get(code);
-  const name = target ? target.general["שם מקצוע"] : "קורס חיצוני/לא מוצע";
+  let name = "קורס חיצוני/לא מוצע";
+  if (target) {
+    name = target.general["שם מקצוע"];
+  } else {
+    const hist = historicalCoursesInfo.get(code);
+    if (hist) {
+      name = hist.general["שם מקצוע"] + " (לא מוצע הסמסטר)";
+    }
+  }
   return `
     <div class="req-link" onclick="selectCourse('${code}')">
       <span class="req-link-text" title="${name}">${name}</span>
@@ -1497,19 +1544,176 @@ function toggleSection(headerElement) {
   section.classList.toggle("collapsed");
 }
 
+// Reset all filters to their inclusive state
+function resetFiltersToInclusive() {
+  // Exams
+  examFilter = 'all';
+  document.getElementById("btn-exam-all").classList.add("active");
+  document.getElementById("btn-exam-yes").classList.remove("active");
+  document.getElementById("btn-exam-no").classList.remove("active");
+
+  // Days
+  activeDays.clear();
+  document.querySelectorAll(".day-tag").forEach(btn => btn.classList.remove("active"));
+
+  // Faculties
+  faculties.forEach(fac => {
+    activeFaculties.add(fac);
+  });
+  document.querySelectorAll(".faculty-tag").forEach(tag => tag.classList.add("active"));
+
+  // Bottom checkboxes
+  showAllHistoricalCourses = true;
+  document.getElementById("chk-show-historical").checked = true;
+
+  showExternalCourses = true;
+  document.getElementById("chk-show-external").checked = true;
+
+  showSportsCourses = true;
+  document.getElementById("chk-show-sports").checked = true;
+
+  showSupportingPrereqs = true;
+  document.getElementById("chk-show-supporting-prereqs").checked = true;
+}
+
+let savedFacultyFilters = null;
+
+// Backup current faculty filter states
+function backupFacultyFilters() {
+  savedFacultyFilters = {
+    examFilter: examFilter,
+    activeDays: new Set(activeDays),
+    activeFaculties: new Set(activeFaculties),
+    showAllHistoricalCourses: showAllHistoricalCourses,
+    showExternalCourses: showExternalCourses,
+    showSportsCourses: showSportsCourses,
+    showSupportingPrereqs: showSupportingPrereqs
+  };
+}
+
+// Restore saved faculty filter states and update the UI controls
+function restoreFacultyFilters() {
+  if (!savedFacultyFilters) return;
+
+  examFilter = savedFacultyFilters.examFilter;
+  activeDays = new Set(savedFacultyFilters.activeDays);
+  activeFaculties = new Set(savedFacultyFilters.activeFaculties);
+  showAllHistoricalCourses = savedFacultyFilters.showAllHistoricalCourses;
+  showExternalCourses = savedFacultyFilters.showExternalCourses;
+  showSportsCourses = savedFacultyFilters.showSportsCourses;
+  showSupportingPrereqs = savedFacultyFilters.showSupportingPrereqs;
+
+  // 1. Exam filter buttons
+  document.querySelectorAll(".filter-btn").forEach(btn => {
+    if (btn.dataset.value === examFilter) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
+
+  // 2. Days tags
+  document.querySelectorAll(".day-tag").forEach(btn => {
+    const day = btn.dataset.value;
+    if (activeDays.has(day)) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
+
+  // 3. Faculty tags
+  document.querySelectorAll(".faculty-tag").forEach(tag => {
+    const fac = tag.dataset.faculty;
+    if (activeFaculties.has(fac)) {
+      tag.classList.add("active");
+    } else {
+      tag.classList.remove("active");
+    }
+  });
+
+  // 4. Checkboxes
+  document.getElementById("chk-show-historical").checked = showAllHistoricalCourses;
+  document.getElementById("chk-show-external").checked = showExternalCourses;
+  document.getElementById("chk-show-sports").checked = showSportsCourses;
+  document.getElementById("chk-show-supporting-prereqs").checked = showSupportingPrereqs;
+
+  savedFacultyFilters = null;
+}
+
+// Hide/show the change layout button based on active viewMode
+function updateLayoutToggleBtnVisibility() {
+  const btn = document.getElementById("layout-toggle-btn");
+  if (btn) {
+    btn.style.display = (viewMode === 'faculty') ? 'flex' : 'none';
+  }
+}
+
+// Scale coordinates in-place to compress/decompress the layout without shuffling node locations
+function applyCompression() {
+  if (!network || !baselinePositions) return;
+  const factor = useCompression ? 0.6 : 1.0;
+  const updates = [];
+  for (const id in baselinePositions) {
+    if (networkNodes.get(id) !== null) {
+      updates.push({
+        id: id,
+        x: baselinePositions[id].x * factor,
+        y: baselinePositions[id].y * factor
+      });
+    }
+  }
+  networkNodes.update(updates);
+}
+
+// Dynamic font resizing in-place without rebuilding the network
+function updateNodeFontSizesInPlace() {
+  if (!networkNodes) return;
+  const updates = [];
+  networkNodes.forEach(node => {
+    const isSelected = (node.id === selectedCourseCode);
+    const course = coursesMap.get(node.id);
+    const hist = historicalCoursesInfo.get(node.id);
+    const isCore = course || hist;
+    
+    let size = baseNodeFontSize;
+    if (isCore) {
+      size = isSelected ? (baseNodeFontSize + 2) : baseNodeFontSize;
+    } else {
+      size = baseNodeFontSize - 0.5;
+    }
+    
+    const currentFont = node.font || {};
+    updates.push({
+      id: node.id,
+      font: {
+        ...currentFont,
+        size: size
+      }
+    });
+  });
+  networkNodes.update(updates);
+}
+
 // Toggle Local / Faculty view mode
 function toggleLocalView(enableLocal) {
   if (enableLocal) {
+    if (viewMode === 'faculty') {
+      backupFacultyFilters();
+    }
     viewMode = 'local';
     document.getElementById("btn-view-local").classList.add("active");
     document.getElementById("btn-view-faculty").classList.remove("active");
     document.getElementById("btn-view-global").classList.remove("active");
+    resetFiltersToInclusive();
   } else {
     viewMode = 'faculty';
     document.getElementById("btn-view-faculty").classList.add("active");
     document.getElementById("btn-view-local").classList.remove("active");
     document.getElementById("btn-view-global").classList.remove("active");
+    restoreFacultyFilters();
   }
+  updateLayoutToggleBtnVisibility();
   renderGraph();
   if (selectedCourseCode) {
     setTimeout(() => selectCourse(selectedCourseCode), 200);
@@ -1543,14 +1747,31 @@ function setupEventListeners() {
       return;
     }
 
-    // Filter courses matching code or name
+    // Filter courses matching code or name across all known courses
     const matches = [];
+    const addedToSearch = new Set();
+    
+    // First, add from current semester
     for (const [code, course] of coursesMap.entries()) {
       const name = course.general["שם מקצוע"].toLowerCase();
       if (code.includes(val) || name.includes(val)) {
         matches.push({ code, name: course.general["שם מקצוע"] });
+        addedToSearch.add(code);
       }
-      if (matches.length >= 10) break; // Limit suggestions to 10
+      if (matches.length >= 10) break;
+    }
+    
+    // If we need more, add from historical courses
+    if (matches.length < 10) {
+      for (const [code, hist] of historicalCoursesInfo.entries()) {
+        if (addedToSearch.has(code)) continue;
+        const name = hist.general["שם מקצוע"].toLowerCase();
+        if (code.includes(val) || name.includes(val)) {
+          matches.push({ code, name: hist.general["שם מקצוע"] + " (מסמסטר אחר)" });
+          addedToSearch.add(code);
+        }
+        if (matches.length >= 10) break;
+      }
     }
 
     if (matches.length > 0) {
@@ -1599,16 +1820,21 @@ function setupEventListeners() {
 
   // View mode controls
   document.getElementById("btn-view-faculty").addEventListener("click", () => {
+    const wasLocal = viewMode === 'local';
     viewMode = 'faculty';
     document.getElementById("btn-view-faculty").classList.add("active");
     document.getElementById("btn-view-local").classList.remove("active");
     document.getElementById("btn-view-global").classList.remove("active");
+    if (wasLocal) {
+      restoreFacultyFilters();
+    }
+    updateLayoutToggleBtnVisibility();
     renderGraph();
   });
 
   document.getElementById("btn-view-local").addEventListener("click", () => {
     if (!selectedCourseCode) {
-      alert("אנא בחר קורס תחילה כדי לצפות בגרף הקשרים הישיר שלו.");
+      alert("אנא בחר קורס קודם מתיבת החיפוש או מהגרף הראשי כדי לראות את העץ הממוקד שלו.");
       return;
     }
     toggleLocalView(true);
@@ -1619,6 +1845,7 @@ function setupEventListeners() {
     document.getElementById("btn-view-global").classList.add("active");
     document.getElementById("btn-view-local").classList.remove("active");
     document.getElementById("btn-view-faculty").classList.remove("active");
+    updateLayoutToggleBtnVisibility();
     renderGraph();
   });
 
@@ -1643,16 +1870,45 @@ function setupEventListeners() {
     }
   });
 
+  document.getElementById("layout-toggle-btn").addEventListener("click", () => {
+    useHierarchicalLayout = !useHierarchicalLayout;
+    const btn = document.getElementById("layout-toggle-btn");
+    if (useHierarchicalLayout) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+    renderGraph();
+  });
+
+  document.getElementById("compress-toggle-btn").addEventListener("click", () => {
+    useCompression = !useCompression;
+    const btn = document.getElementById("compress-toggle-btn");
+    if (useCompression) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+    applyCompression();
+  });
+
+  document.getElementById("node-size-slider").addEventListener("input", (e) => {
+    baseNodeFontSize = parseInt(e.target.value);
+    updateNodeFontSizesInPlace();
+  });
+
   // Faculty filtering headers: Select All / Clear All
   document.getElementById("btn-select-all-faculties").addEventListener("click", () => {
     faculties.forEach(f => activeFaculties.add(f));
     document.querySelectorAll(".faculty-tag").forEach(tag => tag.classList.add("active"));
+    saveCurrentView();
     renderGraph();
   });
 
   document.getElementById("btn-clear-all-faculties").addEventListener("click", () => {
     activeFaculties.clear();
     document.querySelectorAll(".faculty-tag").forEach(tag => tag.classList.remove("active"));
+    saveCurrentView();
     renderGraph();
   });
 
@@ -1662,6 +1918,7 @@ function setupEventListeners() {
       document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
       e.currentTarget.classList.add("active");
       examFilter = e.currentTarget.dataset.value;
+      saveCurrentView();
       renderGraph();
     });
   });
@@ -1677,6 +1934,7 @@ function setupEventListeners() {
         activeDays.add(day);
         e.currentTarget.classList.add("active");
       }
+      saveCurrentView();
       renderGraph(); // Re-apply filter to graph
     });
   });
@@ -1689,12 +1947,14 @@ function setupEventListeners() {
   // Toggle showing historical courses not in the current semester
   document.getElementById("chk-show-historical").addEventListener("change", (e) => {
     showAllHistoricalCourses = e.target.checked;
+    saveCurrentView();
     renderGraph();
   });
 
   // Toggle showing external/non-offered prerequisite courses
   document.getElementById("chk-show-external").addEventListener("change", (e) => {
     showExternalCourses = e.target.checked;
+    saveCurrentView();
     renderGraph();
     if (selectedCourseCode) {
       updateDetailsPanel();
@@ -1735,10 +1995,18 @@ function setupEventListeners() {
   // Toggle showing sports courses
   document.getElementById("chk-show-sports").addEventListener("change", (e) => {
     showSportsCourses = e.target.checked;
+    saveCurrentView();
     renderGraph();
     if (selectedCourseCode) {
       updateDetailsPanel();
     }
+  });
+
+  // Toggle showing supporting prerequisites from other faculties
+  document.getElementById("chk-show-supporting-prereqs").addEventListener("change", (e) => {
+    showSupportingPrereqs = e.target.checked;
+    saveCurrentView();
+    renderGraph();
   });
 
   // Open the Filtered Courses List Modal
@@ -1748,6 +2016,18 @@ function setupEventListeners() {
     
     modal.style.display = "flex";
     searchInput.value = "";
+
+    // Reset dependency filter to 'all' on opening
+    modalDependencyFilter = "all";
+    document.querySelectorAll(".modal-filter-btn").forEach(b => {
+      if (b.dataset.value === "all") {
+        b.classList.add("active");
+      } else {
+        b.classList.remove("active");
+      }
+    });
+
+    updateModalDependencyFilterUI();
     populateModalCoursesTable("");
     searchInput.focus();
   });
@@ -1767,6 +2047,17 @@ function setupEventListeners() {
   // Filter modal table dynamically as you type
   document.getElementById("modal-search-input").addEventListener("input", (e) => {
     populateModalCoursesTable(e.target.value);
+  });
+
+  // Modal Dependency Filter button click listeners
+  document.querySelectorAll(".modal-filter-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      if (e.currentTarget.hasAttribute("disabled")) return;
+      document.querySelectorAll(".modal-filter-btn").forEach(b => b.classList.remove("active"));
+      e.currentTarget.classList.add("active");
+      modalDependencyFilter = e.currentTarget.dataset.value;
+      populateModalCoursesTable(document.getElementById("modal-search-input").value);
+    });
   });
 
   // ── Branch Hiding ─────────────────────────────────────────────────────
@@ -1791,6 +2082,32 @@ function setupEventListeners() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") hideNodeContextMenu();
   });
+
+  // Initial layout button visibility check
+  updateLayoutToggleBtnVisibility();
+}
+
+// Update the visibility, text, and disabled state of dependency filter buttons inside the modal
+function updateModalDependencyFilterUI() {
+  const label = document.getElementById("modal-dependency-filter-label");
+  const prereqBtn = document.getElementById("btn-dep-prereqs");
+  const unlockBtn = document.getElementById("btn-dep-unlocks");
+
+  if (selectedCourseCode) {
+    const course = coursesMap.get(selectedCourseCode) || historicalCoursesInfo.get(selectedCourseCode);
+    const courseName = course ? course.general["שם מקצוע"] : selectedCourseCode;
+    label.textContent = `סינון לפי זיקה ל-${selectedCourseCode} (${courseName}):`;
+    prereqBtn.removeAttribute("disabled");
+    unlockBtn.removeAttribute("disabled");
+    prereqBtn.title = "";
+    unlockBtn.title = "";
+  } else {
+    label.textContent = "סינון לפי זיקה לקורס: (לא נבחר קורס)";
+    prereqBtn.setAttribute("disabled", "true");
+    unlockBtn.setAttribute("disabled", "true");
+    prereqBtn.title = "בחר קורס בגרף כדי לסנן לפי דרישות קדם";
+    unlockBtn.title = "בחר קורס בגרף כדי לסנן לפי פתיחות";
+  }
 }
 
 // Populate the modal courses table based on search input
@@ -1801,12 +2118,31 @@ function populateModalCoursesTable(query = "") {
 
   const trimmedQuery = query.trim().toLowerCase();
 
+  // Get prereqs and unlocks if applicable
+  let allowedCodes = null;
+  if (selectedCourseCode && modalDependencyFilter !== "all") {
+    if (modalDependencyFilter === "prereqs") {
+      allowedCodes = getRecursivePrereqs(selectedCourseCode);
+    } else if (modalDependencyFilter === "unlocks") {
+      allowedCodes = getRecursiveUnlocks(selectedCourseCode);
+    }
+  }
+
   // Filter list
   const filtered = currentFilteredCourses.filter(course => {
+    const code = course.general["מספר מקצוע"];
+    
+    // Check dependency relation filter
+    if (allowedCodes) {
+      if (!allowedCodes.has(code) || code === selectedCourseCode) {
+        return false;
+      }
+    }
+
     if (!trimmedQuery) return true;
-    const code = (course.general["מספר מקצוע"] || "").toLowerCase();
+    const lowerCode = (code || "").toLowerCase();
     const name = (course.general["שם מקצוע"] || "").toLowerCase();
-    return code.includes(trimmedQuery) || name.includes(trimmedQuery);
+    return lowerCode.includes(trimmedQuery) || name.includes(trimmedQuery);
   });
 
   countSpan.textContent = filtered.length;
@@ -1883,7 +2219,7 @@ function buildNodeObject(code) {
         }
       },
       borderWidth: isSelected ? 3 : 2,
-      font: { size: isSelected ? 12 : 10, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' },
+      font: { size: isSelected ? (baseNodeFontSize + 2) : baseNodeFontSize, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' },
       shadow: isSelected ? { enabled: true, color: isLightTheme ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.4)', size: 10 } : false
     };
   }
@@ -1894,12 +2230,12 @@ function buildNodeObject(code) {
   if (hist) {
     return {
       id: code,
-      label: wrapText(hist.name, 15),
-      title: `<b>${code}</b> - ${hist.name}<br>${hist.faculty} (לא מוצע הסמסטר)<br>נקודות: ${hist.points}`,
+      label: wrapText(hist.general["שם מקצוע"], 15),
+      title: `<b>${code}</b> - ${hist.general["שם מקצוע"]}<br>${hist.general["פקולטה"]} (לא מוצע הסמסטר)<br>נקודות: ${hist.general["נקודות"]}`,
       color: { background: 'rgba(239,68,68,0.08)', border: '#ef4444', highlight: { background: 'rgba(239,68,68,0.2)', border: '#ef4444' } },
       borderWidth: 1.5,
       shapeProperties: { borderDashes: [3, 3] },
-      font: { color: isLT ? '#b91c1c' : '#fca5a5', size: 9.5 },
+      font: { color: isLT ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 },
       shadow: false
     };
   }
@@ -1912,7 +2248,7 @@ function buildNodeObject(code) {
     color: { background: 'rgba(239, 68, 68, 0.08)', border: '#ef4444', highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' } },
     borderWidth: 1.5,
     shapeProperties: { borderDashes: [3, 3] },
-    font: { color: isLT ? '#b91c1c' : '#fca5a5', size: 9.5 },
+    font: { color: isLT ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 },
     shadow: false
   };
 }
@@ -2067,7 +2403,11 @@ function _addBranchToDataset(codes) {
 
     const nodeObj = buildNodeObject(code);
     if (nodeObj) {
-      if (hiddenNodePositions[code]) {
+      const factor = useCompression ? 0.6 : 1.0;
+      if (baselinePositions && baselinePositions[code]) {
+        nodeObj.x = baselinePositions[code].x * factor;
+        nodeObj.y = baselinePositions[code].y * factor;
+      } else if (hiddenNodePositions[code]) {
         nodeObj.x = hiddenNodePositions[code].x;
         nodeObj.y = hiddenNodePositions[code].y;
       }

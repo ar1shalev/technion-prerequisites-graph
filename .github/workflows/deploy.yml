@@ -50,7 +50,7 @@ jobs:
           cp ./main/app.js ./gh-pages/
           cp ./main/style.css ./gh-pages/
           # Run the scraper, outputting all course details and semester lists directly into the data folder
-          python -u ./main/courses_to_json.py last-8 \
+          python -u ./main/courses_to_json.py last-24 \
             './gh-pages/data/courses_{year}_{semester}.json' \
             --min-js-output-file='./gh-pages/data/courses_{year}_{semester}.min.js' \
             --last-semesters-output-file './gh-pages/data/last_semesters.json' \

@@ -1653,3 +1653,140 @@ body.light-theme .context-menu-item:hover {
 body.light-theme .hidden-branch-item {
   background: rgba(249, 115, 22, 0.06);
 }
+
+/* Modal Dependency Filter Container */
+.modal-dependency-filter-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 16px;
+}
+
+.modal-filter-label {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.modal-filter-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.modal-filter-btn {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-family: var(--font-he);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.modal-filter-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: var(--border-color-hover);
+}
+
+.modal-filter-btn.active {
+  background: var(--primary-glow);
+  border-color: var(--primary);
+  color: #fff;
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.2);
+}
+
+.modal-filter-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: rgba(255, 255, 255, 0.01);
+  border-color: var(--border-color);
+  color: var(--text-muted);
+}
+
+/* Light theme overrides */
+body.light-theme .modal-filter-btn {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: #e5e7eb;
+  color: #4b5563;
+}
+body.light-theme .modal-filter-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+  color: #111827;
+  border-color: #d1d5db;
+}
+body.light-theme .modal-filter-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(6, 182, 212, 0.2);
+}
+body.light-theme .modal-filter-btn:disabled {
+  background: rgba(0, 0, 0, 0.01);
+  color: #9ca3af;
+  border-color: #e5e7eb;
+}
+
+/* Floating Controls Active State */
+.control-btn.active {
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 12px var(--primary-glow) !important;
+}
+
+/* Node Size Slider Container */
+.node-size-slider-container {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(15, 15, 25, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 8px 16px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+  z-index: 4;
+}
+
+.node-size-slider-container input[type="range"] {
+  width: 120px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+.slider-label {
+  font-family: var(--font-he);
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  user-select: none;
+}
+
+.slider-icon {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Light theme overrides */
+body.light-theme .node-size-slider-container {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: #e5e7eb;
+}
+body.light-theme .slider-label {
+  color: #4b5563;
+}
