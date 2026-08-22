@@ -12,12 +12,11 @@ let courseSemestersMap = new Map(); // code -> Set of semesters
 let showAllHistoricalCourses = false;
 let showExternalCourses = false;
 let showSportsCourses = false;
-let showSupportingPrereqs = true;
 let useHierarchicalLayout = false;
 let useCompression = false;
 let baseNodeFontSize = 10;
 let currentFilteredCourses = []; // courses that match criteria, excluding prereqs
-let modalDependencyFilter = "all"; // 'all', 'prereqs', 'unlocks'
+let modalShowPrereqs = false; // whether modal list includes prerequisite courses
 let savedView = null; // Stores position and scale before re-rendering
 let baselinePositions = null; // Stores original coordinates of nodes before compression
 
@@ -97,7 +96,13 @@ async function loadAllSemestersIndex() {
       if (sem.semester === 200) semName = "חורף";
       else if (sem.semester === 201) semName = "אביב";
       else if (sem.semester === 202) semName = "קיץ";
-      const label = `${semName} ${sem.year}`;
+      // For winter semesters, include both years to avoid confusion
+      let label;
+      if (sem.semester === 200) {
+        label = `${semName} ${sem.year}/${sem.year + 1}`;
+      } else {
+        label = `${semName} ${sem.year}`;
+      }
 
       try {
         const res = await fetch(`data/courses_${sem.year}_${sem.semester}.json`);
@@ -158,7 +163,12 @@ async function initSemesterSelect() {
       else if (sem.semester === 201) semName = "אביב";
       else if (sem.semester === 202) semName = "קיץ";
 
-      option.textContent = `סמסטר ${semName} ${sem.year} (${sem.year % 100}/${(sem.year + 1) % 100})`;
+      // Only winter straddles two calendar years and gets (YY/YY+1)
+      if (sem.semester === 200) {
+        option.textContent = `סמסטר ${semName} ${sem.year} (${sem.year % 100}/${(sem.year + 1) % 100})`;
+      } else {
+        option.textContent = `סמסטר ${semName} ${sem.year}`;
+      }
       select.appendChild(option);
     });
 
@@ -666,6 +676,53 @@ function generateGraphData() {
       }
     });
 
+    // Assign explicit levels for hierarchical layout:
+    // prereqs get negative levels (above), selected = 0, unlocks get positive (below)
+    const prereqSet = new Set(recursivePrereqs);
+    const unlockSet = new Set(recursiveUnlocks);
+    prereqSet.delete(selectedCourseCode);
+    unlockSet.delete(selectedCourseCode);
+
+    // BFS from selected course upward (prereqs) and downward (unlocks) to assign levels
+    const levelMap = new Map();
+    levelMap.set(selectedCourseCode, 0);
+
+    // BFS upward through prereqs
+    let queue = [selectedCourseCode];
+    while (queue.length > 0) {
+      const next = [];
+      for (const node of queue) {
+        const pres = adjList.get(node);
+        if (pres) {
+          pres.forEach(pre => {
+            if (filteredRelevantNodes.has(pre) && !levelMap.has(pre)) {
+              levelMap.set(pre, levelMap.get(node) - 1);
+              next.push(pre);
+            }
+          });
+        }
+      }
+      queue = next;
+    }
+
+    // BFS downward through unlocks
+    queue = [selectedCourseCode];
+    while (queue.length > 0) {
+      const next = [];
+      for (const node of queue) {
+        const children = revAdjList.get(node);
+        if (children) {
+          children.forEach(child => {
+            if (filteredRelevantNodes.has(child) && !levelMap.has(child)) {
+              levelMap.set(child, levelMap.get(node) + 1);
+              next.push(child);
+            }
+          });
+        }
+      }
+      queue = next;
+    }
+
     // Add nodes
     filteredRelevantNodes.forEach(code => {
       const course = coursesMap.get(code);
@@ -682,13 +739,14 @@ function generateGraphData() {
       let nodeObj = {
         id: code,
         label: labelText,
+        level: levelMap.get(code) || 0,
         font: { size: isSelected ? (baseNodeFontSize + 2) : baseNodeFontSize, bold: isSelected, color: isLightTheme ? '#111827' : '#ffffff' }
       };
 
       if (course) {
         const fac = course.general["פקולטה"];
         const name = course.general["שם מקצוע"];
-        nodeObj.title = `<b>${code}</b> - ${name}<br>${fac}<br>נקודות: ${course.general["נקודות"]}`;
+        nodeObj.title = `${code} - ${name}\n${fac}\nנקודות: ${course.general["נקודות"]}`;
 
         if (isSelected) {
           nodeObj.color = {
@@ -708,7 +766,7 @@ function generateGraphData() {
         }
       } else {
         // External node (not offered this semester) - Colored Red
-        nodeObj.title = `<b>${code}</b><br>קורס חיצוני (לא מוצע הסמסטר)`;
+        nodeObj.title = `${code}\nקורס חיצוני (לא מוצע הסמסטר)`;
         nodeObj.color = {
           background: 'rgba(239, 68, 68, 0.08)',
           border: '#ef4444',
@@ -788,7 +846,7 @@ function generateGraphData() {
         const nodeObj = {
           id: code,
           label: wrapText(name, 15),
-          title: `<b>${code}</b> - ${name}<br>${fac}<br>נקודות: ${course.general["נקודות"]}`,
+          title: `${code} - ${name}\n${fac}\nנקודות: ${course.general["נקודות"]}`,
           color: {
             background: isSelected ? hexToRgba(getFacultyColor(fac), 0.8) : hexToRgba(getFacultyColor(fac), isLightTheme ? 0.15 : 0.25),
             border: isSelected ? (isLightTheme ? '#111827' : '#ffffff') : getFacultyColor(fac),
@@ -813,7 +871,7 @@ function generateGraphData() {
           const nodeObj = {
             id: code,
             label: wrapText(name, 15),
-            title: `<b>${code}</b> - ${name}<br>${fac} (לא מוצע הסמסטר)<br>נקודות: ${hist.general["נקודות"]}`,
+            title: `${code} - ${name}\n${fac} (לא מוצע הסמסטר)\nנקודות: ${hist.general["נקודות"]}`,
             color: {
               background: 'rgba(239, 68, 68, 0.08)', // transparent red
               border: '#ef4444', // bright red
@@ -831,9 +889,8 @@ function generateGraphData() {
     });
 
 
-    // Expand graph to include direct requisites from other faculties (User feedback!)
-    if (showSupportingPrereqs) {
-      coreCourses.forEach(code => {
+    // Expand graph to include direct requisites from other faculties
+    coreCourses.forEach(code => {
         const prereqs = adjList.get(code) || new Set();
         prereqs.forEach(pre => {
           if (!addedNodes.has(pre)) {
@@ -851,7 +908,7 @@ function generateGraphData() {
             if (course) {
               const fac = course.general["פקולטה"];
               nodeObj.label = wrapText(course.general["שם מקצוע"], 15);
-              nodeObj.title = `<b>${pre}</b> - ${course.general["שם מקצוע"]}<br>${fac} (דרישת קדם תומכת)<br>נקודות: ${course.general["נקודות"]}`;
+              nodeObj.title = `${pre} - ${course.general["שם מקצוע"]}\n${fac} (דרישת קדם תומכת)\nנקודות: ${course.general["נקודות"]}`;
               // Supporting node style: dark background, dashed colored border, muted text
               nodeObj.color = {
                 background: isLightTheme ? 'rgba(240, 240, 245, 0.95)' : 'rgba(10, 10, 15, 0.95)',
@@ -867,7 +924,7 @@ function generateGraphData() {
             } else {
               // External node - Colored Red
               nodeObj.label = pre;
-              nodeObj.title = `<b>${pre}</b><br>קורס חיצוני (לא מוצע הסמסטר)`;
+              nodeObj.title = `${pre}\nקורס חיצוני (לא מוצע הסמסטר)`;
               nodeObj.color = {
                 background: 'rgba(239, 68, 68, 0.08)',
                 border: '#ef4444',
@@ -883,7 +940,6 @@ function generateGraphData() {
           }
         });
       });
-    }
 
     // Create edges between all added nodes
     addedNodes.forEach(code => {
@@ -1266,7 +1322,7 @@ function updateDetailsPanel() {
   // Get semesters in which this course is offered
   let currentSemName = "";
   const [curYear, curSem] = currentSemester.split("-");
-  if (curSem === "200") currentSemName = `חורף ${curYear}`;
+  if (curSem === "200") currentSemName = `חורף ${curYear}/${parseInt(curYear) + 1}`;
   else if (curSem === "201") currentSemName = `אביב ${curYear}`;
   else if (curSem === "202") currentSemName = `קיץ ${curYear}`;
 
@@ -1571,9 +1627,6 @@ function resetFiltersToInclusive() {
 
   showSportsCourses = true;
   document.getElementById("chk-show-sports").checked = true;
-
-  showSupportingPrereqs = true;
-  document.getElementById("chk-show-supporting-prereqs").checked = true;
 }
 
 let savedFacultyFilters = null;
@@ -1586,8 +1639,7 @@ function backupFacultyFilters() {
     activeFaculties: new Set(activeFaculties),
     showAllHistoricalCourses: showAllHistoricalCourses,
     showExternalCourses: showExternalCourses,
-    showSportsCourses: showSportsCourses,
-    showSupportingPrereqs: showSupportingPrereqs
+    showSportsCourses: showSportsCourses
   };
 }
 
@@ -1601,7 +1653,6 @@ function restoreFacultyFilters() {
   showAllHistoricalCourses = savedFacultyFilters.showAllHistoricalCourses;
   showExternalCourses = savedFacultyFilters.showExternalCourses;
   showSportsCourses = savedFacultyFilters.showSportsCourses;
-  showSupportingPrereqs = savedFacultyFilters.showSupportingPrereqs;
 
   // 1. Exam filter buttons
   document.querySelectorAll(".filter-btn").forEach(btn => {
@@ -1636,7 +1687,6 @@ function restoreFacultyFilters() {
   document.getElementById("chk-show-historical").checked = showAllHistoricalCourses;
   document.getElementById("chk-show-external").checked = showExternalCourses;
   document.getElementById("chk-show-sports").checked = showSportsCourses;
-  document.getElementById("chk-show-supporting-prereqs").checked = showSupportingPrereqs;
 
   savedFacultyFilters = null;
 }
@@ -2002,13 +2052,6 @@ function setupEventListeners() {
     }
   });
 
-  // Toggle showing supporting prerequisites from other faculties
-  document.getElementById("chk-show-supporting-prereqs").addEventListener("change", (e) => {
-    showSupportingPrereqs = e.target.checked;
-    saveCurrentView();
-    renderGraph();
-  });
-
   // Open the Filtered Courses List Modal
   document.getElementById("btn-open-list").addEventListener("click", () => {
     const modal = document.getElementById("courses-list-modal");
@@ -2017,17 +2060,13 @@ function setupEventListeners() {
     modal.style.display = "flex";
     searchInput.value = "";
 
-    // Reset dependency filter to 'all' on opening
-    modalDependencyFilter = "all";
-    document.querySelectorAll(".modal-filter-btn").forEach(b => {
-      if (b.dataset.value === "all") {
-        b.classList.add("active");
-      } else {
-        b.classList.remove("active");
-      }
-    });
+    // Reset the prereqs checkbox to unchecked on every open
+    modalShowPrereqs = false;
+    document.getElementById("chk-modal-show-prereqs").checked = false;
 
-    updateModalDependencyFilterUI();
+    // Re-compute filtered courses to ensure consistency with the current graph
+    refreshCurrentFilteredCourses();
+
     populateModalCoursesTable("");
     searchInput.focus();
   });
@@ -2049,15 +2088,10 @@ function setupEventListeners() {
     populateModalCoursesTable(e.target.value);
   });
 
-  // Modal Dependency Filter button click listeners
-  document.querySelectorAll(".modal-filter-btn").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      if (e.currentTarget.hasAttribute("disabled")) return;
-      document.querySelectorAll(".modal-filter-btn").forEach(b => b.classList.remove("active"));
-      e.currentTarget.classList.add("active");
-      modalDependencyFilter = e.currentTarget.dataset.value;
-      populateModalCoursesTable(document.getElementById("modal-search-input").value);
-    });
+  // Modal "show prereqs" checkbox
+  document.getElementById("chk-modal-show-prereqs").addEventListener("change", (e) => {
+    modalShowPrereqs = e.target.checked;
+    populateModalCoursesTable(document.getElementById("modal-search-input").value);
   });
 
   // ── Branch Hiding ─────────────────────────────────────────────────────
@@ -2087,29 +2121,6 @@ function setupEventListeners() {
   updateLayoutToggleBtnVisibility();
 }
 
-// Update the visibility, text, and disabled state of dependency filter buttons inside the modal
-function updateModalDependencyFilterUI() {
-  const label = document.getElementById("modal-dependency-filter-label");
-  const prereqBtn = document.getElementById("btn-dep-prereqs");
-  const unlockBtn = document.getElementById("btn-dep-unlocks");
-
-  if (selectedCourseCode) {
-    const course = coursesMap.get(selectedCourseCode) || historicalCoursesInfo.get(selectedCourseCode);
-    const courseName = course ? course.general["שם מקצוע"] : selectedCourseCode;
-    label.textContent = `סינון לפי זיקה ל-${selectedCourseCode} (${courseName}):`;
-    prereqBtn.removeAttribute("disabled");
-    unlockBtn.removeAttribute("disabled");
-    prereqBtn.title = "";
-    unlockBtn.title = "";
-  } else {
-    label.textContent = "סינון לפי זיקה לקורס: (לא נבחר קורס)";
-    prereqBtn.setAttribute("disabled", "true");
-    unlockBtn.setAttribute("disabled", "true");
-    prereqBtn.title = "בחר קורס בגרף כדי לסנן לפי דרישות קדם";
-    unlockBtn.title = "בחר קורס בגרף כדי לסנן לפי פתיחות";
-  }
-}
-
 // Populate the modal courses table based on search input
 function populateModalCoursesTable(query = "") {
   const tableBody = document.getElementById("modal-courses-table-body");
@@ -2118,25 +2129,51 @@ function populateModalCoursesTable(query = "") {
 
   const trimmedQuery = query.trim().toLowerCase();
 
-  // Get prereqs and unlocks if applicable
-  let allowedCodes = null;
-  if (selectedCourseCode && modalDependencyFilter !== "all") {
-    if (modalDependencyFilter === "prereqs") {
-      allowedCodes = getRecursivePrereqs(selectedCourseCode);
-    } else if (modalDependencyFilter === "unlocks") {
-      allowedCodes = getRecursiveUnlocks(selectedCourseCode);
+  // Build the full list of displayable courses from all visible graph nodes
+  let allVisibleCourses = [];
+
+  if (networkNodes) {
+    networkNodes.forEach(node => {
+      const code = node.id;
+      const course = coursesMap.get(code) || historicalCoursesInfo.get(code);
+      if (course) {
+        allVisibleCourses.push(course);
+      }
+    });
+  } else {
+    allVisibleCourses = currentFilteredCourses;
+  }
+
+  // Determine which courses to hide when "show prereqs" is unchecked
+  let hiddenByPrereqFilter = null;
+  if (!modalShowPrereqs && networkNodes) {
+    hiddenByPrereqFilter = new Set();
+
+    if (viewMode === 'local' && selectedCourseCode) {
+      // Local view: hide prerequisite courses (ancestors of the selected course)
+      const prereqs = getRecursivePrereqs(selectedCourseCode);
+      prereqs.delete(selectedCourseCode); // Don't hide the selected course itself
+      prereqs.forEach(code => hiddenByPrereqFilter.add(code));
+    } else {
+      // Faculty/Global view: hide courses that don't match the active filters
+      // (i.e. supporting prereqs pulled in from other faculties)
+      const coreCodes = new Set(currentFilteredCourses.map(c => c.general["מספר מקצוע"]));
+      allVisibleCourses.forEach(course => {
+        const code = course.general["מספר מקצוע"];
+        if (!coreCodes.has(code)) {
+          hiddenByPrereqFilter.add(code);
+        }
+      });
     }
   }
 
-  // Filter list
-  const filtered = currentFilteredCourses.filter(course => {
+  // Filter the list
+  const filtered = allVisibleCourses.filter(course => {
     const code = course.general["מספר מקצוע"];
-    
-    // Check dependency relation filter
-    if (allowedCodes) {
-      if (!allowedCodes.has(code) || code === selectedCourseCode) {
-        return false;
-      }
+
+    // Apply prereqs filter
+    if (hiddenByPrereqFilter && hiddenByPrereqFilter.has(code)) {
+      return false;
     }
 
     if (!trimmedQuery) return true;
@@ -2209,7 +2246,7 @@ function buildNodeObject(code) {
     return {
       id: code,
       label: wrapText(name, 15),
-      title: `<b>${code}</b> - ${name}<br>${fac}<br>נקודות: ${course.general["נקודות"]}`,
+      title: `${code} - ${name}\n${fac}\nנקודות: ${course.general["נקודות"]}`,
       color: {
         background: isSelected ? hexToRgba(getFacultyColor(fac), 0.8) : hexToRgba(getFacultyColor(fac), isLightTheme ? 0.15 : 0.25),
         border: isSelected ? (isLightTheme ? '#111827' : '#ffffff') : getFacultyColor(fac),
@@ -2231,7 +2268,7 @@ function buildNodeObject(code) {
     return {
       id: code,
       label: wrapText(hist.general["שם מקצוע"], 15),
-      title: `<b>${code}</b> - ${hist.general["שם מקצוע"]}<br>${hist.general["פקולטה"]} (לא מוצע הסמסטר)<br>נקודות: ${hist.general["נקודות"]}`,
+      title: `${code} - ${hist.general["שם מקצוע"]}\n${hist.general["פקולטה"]} (לא מוצע הסמסטר)\nנקודות: ${hist.general["נקודות"]}`,
       color: { background: 'rgba(239,68,68,0.08)', border: '#ef4444', highlight: { background: 'rgba(239,68,68,0.2)', border: '#ef4444' } },
       borderWidth: 1.5,
       shapeProperties: { borderDashes: [3, 3] },
@@ -2244,7 +2281,7 @@ function buildNodeObject(code) {
   return {
     id: code,
     label: code,
-    title: `<b>${code}</b><br>קורס חיצוני (לא מוצע הסמסטר)`,
+    title: `${code}\nקורס חיצוני (לא מוצע הסמסטר)`,
     color: { background: 'rgba(239, 68, 68, 0.08)', border: '#ef4444', highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' } },
     borderWidth: 1.5,
     shapeProperties: { borderDashes: [3, 3] },
@@ -2346,36 +2383,32 @@ function hideCourseBranch(rootCode) {
 }
 
 /**
- * Restore a previously hidden branch in-place: adds node + edge objects
- * directly into the live vis.js DataSets, then enables physics briefly so
- * the new nodes settle near their neighbours without moving existing ones.
+ * Restore a previously hidden branch by doing a full graph re-render.
+ * This ensures restored nodes go through the same filter pipeline as
+ * all other nodes, preventing filter-bypassing bugs.
  */
 function restoreCourseBranch(rootCode) {
   const idx = hiddenBranches.findIndex(b => b.root === rootCode);
   if (idx === -1) return;
-  const branch = hiddenBranches.splice(idx, 1)[0];
+  hiddenBranches.splice(idx, 1);
 
   // Rebuild hiddenCourses from remaining branches
   hiddenCourses.clear();
   hiddenBranches.forEach(b => b.codes.forEach(c => hiddenCourses.add(c)));
 
-  _addBranchToDataset(branch.codes);
   updateHiddenBranchesPanel();
-
-  // Also refresh the filtered-courses cache
-  refreshCurrentFilteredCourses();
+  saveCurrentView();
+  renderGraph();
 }
 
-/** Remove all hidden branches and add all nodes back in-place. */
+/** Remove all hidden branches and re-render the full graph. */
 function resetAllHiddenBranches() {
-  const allCodes = new Set(hiddenCourses); // snapshot before clearing
   hiddenCourses.clear();
   hiddenBranches = [];
 
-  _addBranchToDataset(allCodes);
   updateHiddenBranchesPanel();
-
-  refreshCurrentFilteredCourses();
+  saveCurrentView();
+  renderGraph();
 }
 
 /**
