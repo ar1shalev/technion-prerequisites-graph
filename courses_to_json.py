@@ -494,8 +494,16 @@ def parse_room_info(
         raise RuntimeError(f"Invalid building and room: {building_and_room}")
 
 
-def parse_date_and_time_string(date_and_time: str) -> EventScheduleTime:
-    """Parse a single date and time string into weekday, begin time, end time."""
+def parse_date_and_time_string(date_and_time: str) -> Optional[EventScheduleTime]:
+    """Parse a single date and time string into weekday, begin time, end time.
+
+    Returns None for specific-date entries (e.g. "06.10. 09:00-14:00") that
+    can appear mixed with weekday entries in comma-separated schedule strings.
+    """
+    # Skip specific-date entries like "06.10. 09:00-14:00" or "27.05.: 10:00-12:00"
+    if re.fullmatch(r"\d\d\.\d\d\.(?::)? \d\d:\d\d-\d\d:\d\d", date_and_time):
+        return None
+
     match = re.fullmatch(
         r"(?:יום|יוֹם) (רִאשׁוֹ|ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)"
         r" (\d\d:\d\d)\s*-\s*(\d\d:\d\d)",
@@ -556,7 +564,8 @@ def parse_schedule_times(raw_schedule_item: dict) -> Optional[list[EventSchedule
     date_and_time_list = re.sub(r", הכל \d+ ימים$", "", date_and_time_list)
     date_and_time_list = [x.strip() for x in date_and_time_list.split(",")]
 
-    return [parse_date_and_time_string(x) for x in date_and_time_list]
+    parsed = [parse_date_and_time_string(x) for x in date_and_time_list]
+    return [x for x in parsed if x is not None]
 
 
 def reassign_event_ids(
