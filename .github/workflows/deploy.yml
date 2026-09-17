@@ -45,6 +45,8 @@ jobs:
           fi
           # Ensure the data directory exists in the deployment branch
           mkdir -p ./gh-pages/data
+          # Remove the stray Python bytecode cache inherited from the main branch
+          rm -rf ./gh-pages/__pycache__
           # Copy the latest UI files from main branch to the deployment branch
           cp ./main/index.html ./gh-pages/
           cp ./main/app.js ./gh-pages/

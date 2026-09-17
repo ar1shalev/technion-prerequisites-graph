@@ -4,3 +4,6 @@ cache/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Claude Code local settings (personal, not for the public repo)
+.claude/
