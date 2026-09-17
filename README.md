@@ -97,14 +97,21 @@ pip install requests tqdm
 ```
 
 ### 2. Fetch and Re-generate Semester Files
-Run the scraper script with the `last-N` option. This will query the Technion servers for the active semesters list, create the select index, and pull course details for the last `N` semesters (we recommend pulling `24` semesters to cover an 8-year history, including Winter, Spring, and Summer terms):
+Run the scraper script with the `last-N` option. It queries the Technion servers for the active semesters list, creates the select index, and pulls course details for the last `N` semesters.
+
+**Routine update** — fetch only the most recent year (Winter, Spring and Summer). This is what the deploy workflow runs, and it is much faster than a full pull:
+```bash
+python3 courses_to_json.py last-3 "data/courses_{year}_{semester}.json" --last-semesters-output-file "data/last_semesters.json"
+```
+
+**First-time setup or backfill** — pull `24` semesters to cover an 8-year history:
 ```bash
 python3 courses_to_json.py last-24 "data/courses_{year}_{semester}.json" --last-semesters-output-file "data/last_semesters.json"
 ```
 
 The script will:
-- Write `data/last_semesters.json` containing the metadata for the active semesters.
-- Query and generate `data/courses_{year}_{semester}.json` files for each catalog term.
+- Write `data/last_semesters.json` containing the metadata for the active semesters. Existing entries are merged, not overwritten, so semesters from earlier runs stay listed.
+- Query and generate `data/courses_{year}_{semester}.json` files for each catalog term it fetches. Files for semesters outside the requested range are left untouched.
 
 ### 3. Deploy
 Commit the updated `data/` folder and push to your GitHub Pages branch. The web application dynamically reads `data/last_semesters.json` and loads the corresponding course details as the user navigates, requiring no changes to the HTML, CSS, or JS files!
