@@ -101,7 +101,7 @@ async function loadAllSemestersIndex() {
       if (sem.semester === 200) {
         label = `${semName} ${sem.year}/${sem.year + 1}`;
       } else {
-        label = `${semName} ${sem.year}`;
+        label = `${semName} ${sem.year + 1}`;
       }
 
       try {
@@ -149,7 +149,7 @@ async function initSemesterSelect() {
   try {
     const response = await fetch("data/last_semesters.json");
     if (!response.ok) throw new Error("Failed to load semesters metadata");
-    const semesters = await response.ok ? await response.json() : [];
+    const semesters = await response.json();
 
     const select = document.getElementById("semester-select");
     select.innerHTML = "";
@@ -167,7 +167,7 @@ async function initSemesterSelect() {
       if (sem.semester === 200) {
         option.textContent = `סמסטר ${semName} ${sem.year} (${sem.year % 100}/${(sem.year + 1) % 100})`;
       } else {
-        option.textContent = `סמסטר ${semName} ${sem.year}`;
+        option.textContent = `סמסטר ${semName} ${sem.year + 1}`;
       }
       select.appendChild(option);
     });
