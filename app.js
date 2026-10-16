@@ -121,6 +121,39 @@ function getResponsible(course) {
   return Array.from(new Set(names));
 }
 
+// Staff listed on the course's schedule rows of one type - the same names the
+// schedule cards show as "סגל". Filtering by type keeps tutors out of the lecturers.
+function getScheduleStaff(course, type) {
+  const names = [];
+  ((course && course.schedule) || []).forEach(item => {
+    if (item["סוג"] !== type || !item["מרצה/מתרגל"]) return;
+    item["מרצה/מתרגל"].split("\n").forEach(n => {
+      if (n.trim()) names.push(n.trim());
+    });
+  });
+  return Array.from(new Set(names));
+}
+
+function getLecturers(course) {
+  return getScheduleStaff(course, "הרצאה");
+}
+
+// Who to show for a course. אחראים is empty for about half the courses as SAP
+// returns them, so fall back to the lecturers, then - for lab-only courses - the
+// lab staff, each labelled as what it is.
+function getCourseStaff(course) {
+  const responsible = getResponsible(course);
+  if (responsible.length > 0) return { label: "אחראי/ת הקורס", names: responsible };
+
+  const lecturers = getLecturers(course);
+  if (lecturers.length > 0) return { label: "מרצים", names: lecturers };
+
+  const labStaff = getScheduleStaff(course, "מעבדה");
+  if (labStaff.length > 0) return { label: "סגל מעבדה", names: labStaff };
+
+  return { label: "אחראי/ת הקורס", names: [] };
+}
+
 function courseDisplayName(code) {
   const course = coursesMap.get(code) || historicalCoursesInfo.get(code);
   return course ? course.general["שם מקצוע"] : code;
@@ -157,9 +190,9 @@ function buildNodeTooltip(code, kind) {
 
   lines.push(`נקודות: ${gen["נקודות"]}`);
 
-  const responsible = getResponsible(course);
-  if (responsible.length > 0) {
-    lines.push(`אחראים: ${responsible.join(", ")}`);
+  const staff = getCourseStaff(course);
+  if (staff.names.length > 0) {
+    lines.push(`${staff.label}: ${staff.names.join(", ")}`);
   }
 
   if (kind === 'other-semester') {
@@ -1573,8 +1606,8 @@ function updateDetailsPanel() {
   `;
 
   // Course-responsible staff, which changes between semesters
-  const responsible = getResponsible(course);
-  const responsibleText = responsible.length > 0 ? responsible.join(", ") : "לא פורסם";
+  const staff = getCourseStaff(course);
+  const staffText = staff.names.length > 0 ? staff.names.join(", ") : "לא פורסם";
 
   // Prefer the grouped and/or view. A handful of courses have malformed prerequisite
   // strings that don't parse, and those fall back to the old flat list.
@@ -1621,8 +1654,8 @@ function updateDetailsPanel() {
           <span class="meta-value" style="color: ${hasExam === 'כן' ? 'var(--warning)' : 'var(--accent)'}; font-weight: bold;">${hasExam}</span>
         </div>
         <div class="meta-item" style="grid-column: span 2; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px;">
-          <span class="meta-label">אחראי/ת הקורס (סמסטר ${dataSemName})</span>
-          <span class="meta-value" style="font-weight: 500; font-size: 12.5px; ${responsible.length > 0 ? '' : 'color: var(--text-muted); font-style: italic;'}">${responsibleText}</span>
+          <span class="meta-label">${staff.label} (סמסטר ${dataSemName})</span>
+          <span class="meta-value" style="font-weight: 500; font-size: 12.5px; ${staff.names.length > 0 ? '' : 'color: var(--text-muted); font-style: italic;'}">${staffText}</span>
         </div>
         <div class="meta-item" style="grid-column: span 2; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px;">
           <span class="meta-label">סמסטרים שבהם נלמד</span>
