@@ -30,6 +30,18 @@ function saveCurrentView() {
 
 let historicalCoursesInfo = new Map(); // code -> course object, from the most recent semester that offered it
 let historicalCourseSource = new Map(); // code -> { year, semester, label } that historicalCoursesInfo came from
+// code -> name, from the names SAP sends with each prerequisite. This is the only
+// source of a name for prerequisites that aren't offered in any semester we have.
+// A number's name doesn't depend on the semester, so this is never cleared.
+let prereqNames = new Map();
+
+function rememberPrereqNames(course) {
+  const names = course && course.general && course.general["שמות מקצועות קדם"];
+  if (!names) return;
+  for (const [code, name] of Object.entries(names)) {
+    if (name && !prereqNames.has(code)) prereqNames.set(code, name);
+  }
+}
 
 // Branch Hiding State
 let hiddenCourses = new Set();  // all explicitly hidden course codes
@@ -58,8 +70,8 @@ const FACULTY_COLORS = {
   "הפקולטה להנדסת מכונות": "#eab308", // Yellow
   "הפקולטה להנדסה אזרחית וסביבתית": "#10b981", // Emerald
   "הפקולטה להנדסת אווירונוטיקה וחלל": "#14b8a6", // Teal
-  "הפקולטה לרפואה": "#ef4444", // Red
-  "הפקולטה להנדסה ביו-רפואית": "#f43f5e", // Rose
+  "הפקולטה לרפואה": "#a16207", // Brown - not red, which marks external courses
+  "הפקולטה להנדסה ביו-רפואית": "#e5e7eb", // Pale grey - rose was too close to the external red
   "הפקולטה לביולוגיה": "#22c55e", // Green
   "הפקולטה לארכיטקטורה ובינוי ערים": "#84cc16", // Lime
   "המחלקה ללימודים הומניסטיים ואמנות": "#6b7280", // Gray
@@ -156,7 +168,8 @@ function getCourseStaff(course) {
 
 function courseDisplayName(code) {
   const course = coursesMap.get(code) || historicalCoursesInfo.get(code);
-  return course ? course.general["שם מקצוע"] : code;
+  if (course) return course.general["שם מקצוע"];
+  return prereqNames.get(code) || code;
 }
 
 // One tooltip builder for all four node kinds, so the three places that build nodes
@@ -169,7 +182,8 @@ function buildNodeTooltip(code, kind) {
     : coursesMap.get(code);
 
   if (!course) {
-    lines.push(code);
+    const name = prereqNames.get(code);
+    lines.push(name ? `${code} - ${name}` : code);
     lines.push("קורס חיצוני — לא נמצא באף סמסטר בנתונים");
     const requiredBy = Array.from(revAdjList.get(code) || []);
     if (requiredBy.length > 0) {
@@ -252,6 +266,7 @@ async function loadAllSemestersIndex() {
           const data = await res.json();
           data.forEach(course => {
             const code = course.general && course.general["מספר מקצוע"];
+            rememberPrereqNames(course);
             if (code) {
               if (!courseSemestersMap.has(code)) {
                 courseSemestersMap.set(code, new Set());
@@ -380,6 +395,7 @@ function processCoursesData() {
     if (gen && gen["מספר מקצוע"]) {
       const code = gen["מספר מקצוע"];
       coursesMap.set(code, course);
+      rememberPrereqNames(course);
 
       if (gen["פקולטה"]) {
         uniqueFaculties.add(gen["פקולטה"].trim());
@@ -1013,6 +1029,7 @@ function generateGraphData() {
       } else {
         const hist = historicalCoursesInfo.get(code);
         if (hist) labelText = wrapText(hist.general["שם מקצוע"], 15);
+        else if (prereqNames.has(code)) labelText = wrapText(prereqNames.get(code), 15);
       }
 
       let nodeObj = {
@@ -1199,7 +1216,7 @@ function generateGraphData() {
               applyUnofferedNodeStyle(nodeObj, OTHER_SEMESTER_STYLE, isLightTheme);
             } else {
               // Only ever seen inside a prerequisite list
-              nodeObj.label = pre;
+              nodeObj.label = prereqNames.has(pre) ? wrapText(prereqNames.get(pre), 15) : pre;
               nodeObj.title = buildNodeTooltip(pre, 'external');
               applyUnofferedNodeStyle(nodeObj, EXTERNAL_STYLE, isLightTheme);
             }
@@ -1526,7 +1543,7 @@ function updateDetailsPanel() {
     container.innerHTML = `
       <div class="course-card" style="--faculty-color: ${facultyColor}">
         <div class="course-card-header">
-          <h2 class="course-card-title">קורס חיצוני</h2>
+          <h2 class="course-card-title">${prereqNames.get(selectedCourseCode) || "קורס חיצוני"}</h2>
           <div class="course-card-code">${selectedCourseCode}</div>
         </div>
         <div class="course-meta-grid">
@@ -1891,7 +1908,9 @@ function renderReqLink(code) {
       name = hist.general["שם מקצוע"] + " (לא מוצע הסמסטר)";
       accent = OTHER_SEMESTER_STYLE.border;
     } else {
-      name = "קורס חיצוני - לא נמצא בנתונים";
+      name = prereqNames.has(code)
+        ? `${prereqNames.get(code)} (קורס חיצוני)`
+        : "קורס חיצוני - לא נמצא בנתונים";
       accent = EXTERNAL_STYLE.border;
     }
   }
@@ -2631,7 +2650,7 @@ function buildNodeObject(code) {
   // Only ever seen inside a prerequisite list
   return applyUnofferedNodeStyle({
     id: code,
-    label: code,
+    label: prereqNames.has(code) ? wrapText(prereqNames.get(code), 15) : code,
     title: buildNodeTooltip(code, 'external'),
     shadow: false
   }, EXTERNAL_STYLE, isLightTheme);

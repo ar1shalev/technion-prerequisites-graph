@@ -116,6 +116,12 @@ MaxDataServiceVersion: 2.0
 
     result = json.loads(json_str)
 
+    # SAP sometimes answers with an error message instead of data - "שגיאה.", or
+    # "not found" for rooms that exist - and the same request works moments later.
+    if "d" not in result and "error" in result:
+        message = result["error"].get("message", {}).get("value", "")
+        raise SapErrorReply(f"SAP answered with an error: {message}")
+
     if not allow_empty and result == {"d": {"results": []}}:
         raise RuntimeError("Empty response")
 
@@ -126,11 +132,29 @@ MaxDataServiceVersion: 2.0
     return result
 
 
+class SapErrorReply(RuntimeError):
+    """SAP answered the request, but with an error message instead of data."""
+
+
+SAP_ERROR_REPLY_ATTEMPTS = 8
+
+
 def send_request(query: str, allow_empty=False):
     delay = 5
+    error_reply_delay = 2
+    error_replies = 0
     while True:
         try:
             return send_request_once(query, allow_empty)
+        except SapErrorReply as e:
+            # These are usually gone on the next try, so retry quickly - but give up
+            # eventually, so a request that can genuinely never work can't hang the run.
+            error_replies += 1
+            if error_replies >= SAP_ERROR_REPLY_ATTEMPTS:
+                raise
+            print(f"Error: {e} for {query}, retrying")
+            time.sleep(error_reply_delay)
+            error_reply_delay = min(error_reply_delay * 2, 30)
         except Exception as e:
             print(f"Error: {e} for {query}")
             time.sleep(delay)
@@ -261,8 +285,61 @@ def get_sap_course(year: int, semester: int, course: str):
     return results[0]
 
 
+# Building names for every room of the semester being scraped, keyed by SAP's room
+# id, plus one name per three-digit building code. load_room_table() fills them
+# once per semester before the worker processes start, and pool_init() hands them
+# to each worker, so a lesson doesn't need its own request to name its building.
+ROOM_BUILDINGS: dict[str, str] = {}
+BUILDING_BY_CODE: dict[str, str] = {}
+
+
+def load_room_table(year: int, semester: int):
+    """Fetch every room of the semester with its building name, in one request."""
+    params = {
+        "sap-client": "700",
+        "$top": "10000",
+        "$filter": f"Peryr eq '{year}' and Perid eq '{semester}'",
+        "$select": "Otjid,Building,BuildingId",
+    }
+    query = f"GObjectSet?{urllib.parse.urlencode(params)}"
+
+    try:
+        rooms = send_request(query, allow_empty=True)["d"]["results"]
+    except SapErrorReply:
+        rooms = None
+
+    room_buildings = {}
+    building_by_code = {}
+    if rooms is None:
+        print(
+            f"Warning: couldn't get the room list for {year}-{semester},"
+            " looking rooms up one at a time instead"
+        )
+        return room_buildings, building_by_code
+
+    for room in rooms:
+        if room["Building"]:
+            name = clean_building_name(room["Building"])
+            room_buildings[room["Otjid"]] = name
+            building_by_code.setdefault(room["BuildingId"], name)
+
+    print(f"Got building names for {len(room_buildings)} rooms in {len(building_by_code)} buildings")
+    return room_buildings, building_by_code
+
+
 @cache
-def get_building_name(year: int, semester: int, room_id: str):
+def get_building_name(year: int, semester: int, room_id: str, building_code: str):
+    if room_id in ROOM_BUILDINGS:
+        return ROOM_BUILDINGS[room_id]
+
+    # A room missing from the list, e.g. one added after it was fetched. Every room
+    # with the same building code has the same building name, so borrow it.
+    if building_code in BUILDING_BY_CODE:
+        return BUILDING_BY_CODE[building_code]
+
+    # Last resort, ask about this one room. If SAP still can't name it after
+    # send_request's retries, leave the building blank rather than fail the whole
+    # run over one lesson's location.
     params = {
         "sap-client": "700",
         "$select": ",".join(
@@ -271,13 +348,20 @@ def get_building_name(year: int, semester: int, room_id: str):
             ]
         ),
     }
-    raw_data = send_request(
-        f"GObjectSet(Otjid='{urllib.parse.quote(room_id)}',Peryr='{year}',Perid='{semester}')?{urllib.parse.urlencode(params)}"
-    )
-    building = raw_data["d"]["Building"]
-    if not building:
-        raise RuntimeError(f"Invalid building for room: {room_id}")
+    query = f"GObjectSet(Otjid='{urllib.parse.quote(room_id)}',Peryr='{year}',Perid='{semester}')?{urllib.parse.urlencode(params)}"
+    try:
+        building = send_request(query)["d"]["Building"]
+    except SapErrorReply:
+        building = ""
 
+    if not building:
+        print(f"Warning: no building name for room {room_id}, leaving it blank")
+        return ""
+
+    return clean_building_name(building)
+
+
+def clean_building_name(building: str) -> str:
     building = re.sub(r"\s+", " ", building.strip())
 
     mapping = {
@@ -408,7 +492,7 @@ def get_event_schedule_info(
             room_name = room["Name"]
 
             if match := re.fullmatch(r"(\d\d\d)-(\d\d\d\d)", room_name):
-                building = get_building_name(year, semester, room_id)
+                building = get_building_name(year, semester, room_id, match.group(1))
                 room_number = int(match.group(2))
                 buildings.add(building)
                 room_numbers.add(room_number)
@@ -487,7 +571,9 @@ def parse_room_info(
         return None
 
     if match := re.fullmatch(r"(\d\d\d)-(\d\d\d\d)", building_and_room):
-        building = get_building_name(year, semester, raw_schedule_item["RoomId"])
+        building = get_building_name(
+            year, semester, raw_schedule_item["RoomId"], match.group(1)
+        )
         room = int(match.group(2))
         return building, room
     else:
@@ -989,6 +1075,9 @@ def get_course_full_data(year: int, semester: int, course_number: str):
             raise RuntimeError(f"Invalid relationship: {rel_item['ZzRelationshipKey']}")
 
     prereq = ""
+    # SAP sends each required course's name with the prerequisite record. Keeping it
+    # lets the site name prerequisites that aren't offered in any semester we have.
+    prereq_names = {}
     last_prereq_item = None
     for prereq_item in sap_course["SmPrereq"]["results"]:
         # In case of a buggy entry with two consecutive course ids, add a space.
@@ -1004,6 +1093,9 @@ def get_course_full_data(year: int, semester: int, course_number: str):
         prereq += prereq_item["Bracket"]
         if prereq_item["ModuleId"].lstrip("0"):
             prereq += prereq_item["ModuleId"]
+            module_name = re.sub(r"\s+", " ", prereq_item.get("ModuleName") or "").strip()
+            if module_name:
+                prereq_names[prereq_item["ModuleId"]] = module_name
         if prereq_item["Operator"] == "AND":
             prereq += f" ו-"
         elif prereq_item["Operator"] == "OR":
@@ -1028,6 +1120,9 @@ def get_course_full_data(year: int, semester: int, course_number: str):
 
     if prereq:
         general["מקצועות קדם"] = prereq
+
+    if prereq_names:
+        general["שמות מקצועות קדם"] = prereq_names
 
     if adjoining:
         general["מקצועות צמודים"] = " ".join(adjoining)
@@ -1091,8 +1186,11 @@ def get_course_full_data(year: int, semester: int, course_number: str):
     }
 
 
-def pool_init(proxies):
+def pool_init(proxies, room_buildings, building_by_code):
+    global ROOM_BUILDINGS, BUILDING_BY_CODE
     session.proxies = proxies
+    ROOM_BUILDINGS = room_buildings
+    BUILDING_BY_CODE = building_by_code
 
 
 def get_course_full_data_star(args):
@@ -1191,9 +1289,12 @@ def run(
     print(f"Fetching data for {year}-{semester}...")
 
     course_numbers = sorted(get_sap_course_numbers(year, semester))
+    room_buildings, building_by_code = load_room_table(year, semester)
 
     with Pool(
-        POOL_CONCURRENT_PROCESSES, initializer=pool_init, initargs=(session.proxies,)
+        POOL_CONCURRENT_PROCESSES,
+        initializer=pool_init,
+        initargs=(session.proxies, room_buildings, building_by_code),
     ) as pool:
         args = list(
             zip(

@@ -210,7 +210,7 @@ body.light-theme .left-filters-panel {
 }
 
 body.light-theme .legend-panel {
-  background: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.55);
 }
 
 body.light-theme .req-option {
@@ -1267,7 +1267,7 @@ body.light-theme .req-option-badge {
   bottom: 24px;
   left: 24px;
   z-index: 4;
-  background: rgba(15, 15, 25, 0.85);
+  background: rgba(15, 15, 25, 0.55);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border-color);
   border-radius: 12px;
