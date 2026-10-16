@@ -142,7 +142,7 @@
               <div class="filter-group" style="margin-top: 8px; padding-bottom: 4px;">
                 <label class="switch-container" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: var(--text-secondary); font-weight: 600;">
                   <input type="checkbox" id="chk-show-external" style="cursor: pointer; width: 14px; height: 14px;">
-                  <span>הצג דרישות קדם חיצוניות (לא מוצעות)</span>
+                  <span>הצג קורסים חיצוניים (לא קיימים בנתונים)</span>
                 </label>
               </div>
 
@@ -180,7 +180,6 @@
         <nav class="view-modes-panel" aria-label="מצבי תצוגת גרף">
           <button class="view-mode-tab active" id="btn-view-faculty">גרף פקולטי</button>
           <button class="view-mode-tab" id="btn-view-local">עץ קשרים ממוקד</button>
-          <button class="view-mode-tab" id="btn-view-global">גרף גלובלי מלא</button>
         </nav>
         
         <!-- Dynamic Graph Canvas element -->
@@ -189,7 +188,7 @@
         <!-- Floating Graph Navigation Buttons -->
         <div class="graph-controls">
           <button class="control-btn" id="layout-toggle-btn" title="שנה פריסה (פיזור חופשי / שכבות היררכיות)"><i class="fa-solid fa-sitemap"></i></button>
-          <button class="control-btn" id="compress-toggle-btn" title="שנה דחיסות גרף (פריסה מרווחת / צפופה)"><i class="fa-solid fa-compress"></i></button>
+          <button class="control-btn" id="compress-toggle-btn" title="פריסה צפופה / מרווחת"><i class="fa-solid fa-compress"></i></button>
           <button class="control-btn" id="zoom-in-btn" title="התקרב"><i class="fa-solid fa-plus"></i></button>
           <button class="control-btn" id="zoom-out-btn" title="התרחק"><i class="fa-solid fa-minus"></i></button>
           <button class="control-btn" id="fit-btn" title="התאם למסך"><i class="fa-solid fa-expand"></i></button>
@@ -204,7 +203,7 @@
         
         <!-- Floating Legend -->
         <section class="legend-panel" id="legend-panel">
-          <h2 class="legend-title">מקרא פקולטות</h2>
+          <h2 class="legend-title">מקרא</h2>
           <div class="legend-items" id="legend-items">
             <!-- Dynamically populated -->
           </div>

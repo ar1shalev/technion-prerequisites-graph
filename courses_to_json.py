@@ -1137,6 +1137,50 @@ def postprocess(result: list[dict], output_file: Path):
     return result
 
 
+def read_existing_courses(output_file: Path) -> Optional[list]:
+    """Load a previously generated courses file, or None if it's missing or unusable."""
+    if not output_file.exists():
+        return None
+
+    try:
+        with output_file.open("r", encoding="utf-8") as f:
+            previous = json.load(f)
+    except Exception as e:
+        print(f"Warning: Could not read existing courses file {output_file}: {e}")
+        return None
+
+    return previous if isinstance(previous, list) else None
+
+
+def should_skip_write(previous: Optional[list], result: list) -> Optional[str]:
+    """Decide whether a fresh scrape may replace the file already on disk.
+
+    Returns a reason to keep the previous file, or None to write the new one.
+
+    A semester with no previous file is always written, so a brand new term can
+    never be blocked before it has anything to lose. Otherwise the new data is
+    rejected only when it is empty, which means the server is down or the term
+    isn't populated yet. A smaller but still populated scrape is a legitimate
+    update: rejecting those on a size threshold would freeze a file forever the
+    first time a semester genuinely shrinks.
+    """
+    if not previous:
+        return None
+
+    if len(result) == 0:
+        return f"scrape returned no courses, existing file has {len(previous)}"
+
+    previous_schedules = sum(len(course.get("schedule", [])) for course in previous)
+    result_schedules = sum(len(course.get("schedule", [])) for course in result)
+    if result_schedules == 0 and previous_schedules > 0:
+        return (
+            f"scrape returned no schedules at all for {len(result)} courses,"
+            f" existing file has {previous_schedules}"
+        )
+
+    return None
+
+
 def run(
     year: int,
     semester: int,
@@ -1162,6 +1206,19 @@ def run(
 
     all_schedules_missing = all(len(x["schedule"]) == 0 for x in result)
 
+    # Never let an empty scrape replace good data. Bail out before any of the
+    # three outputs is touched, so they can't end up out of sync with each other.
+    skip_reason = should_skip_write(read_existing_courses(output_file), result)
+    if skip_reason:
+        print(
+            f"Keeping the existing data for {year}-{semester}: {skip_reason}."
+            f" Delete {output_file} to force a rewrite."
+        )
+        return {
+            "all_schedules_missing": all_schedules_missing,
+            "skipped": True,
+        }
+
     with output_file.open("w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
 
@@ -1175,6 +1232,7 @@ def run(
 
     return {
         "all_schedules_missing": all_schedules_missing,
+        "skipped": False,
     }
 
 

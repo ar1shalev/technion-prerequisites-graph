@@ -112,6 +112,7 @@ python3 courses_to_json.py last-24 "data/courses_{year}_{semester}.json" --last-
 The script will:
 - Write `data/last_semesters.json` containing the metadata for the active semesters. Existing entries are merged, not overwritten, so semesters from earlier runs stay listed.
 - Query and generate `data/courses_{year}_{semester}.json` files for each catalog term it fetches. Files for semesters outside the requested range are left untouched.
+- Skip writing any semester whose scrape comes back empty — no courses at all, or no schedules for any course — when a file for it already exists. That keeps a server outage from replacing good data with an empty file. A semester with no file yet is always written, even when empty, so a newly published term is never blocked. To force a rewrite anyway, delete the file first.
 
 ### 3. Deploy
 Commit the updated `data/` folder and push to your GitHub Pages branch. The web application dynamically reads `data/last_semesters.json` and loads the corresponding course details as the user navigates, requiring no changes to the HTML, CSS, or JS files!
