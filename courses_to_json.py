@@ -1250,6 +1250,56 @@ def read_existing_courses(output_file: Path) -> Optional[list]:
     return previous if isinstance(previous, list) else None
 
 
+LOST_LESSONS_ATTEMPTS = 2
+
+
+def restore_lost_lessons(year: int, semester: int, result: list, previous: Optional[list]):
+    """Don't let one empty reply wipe a course's lessons.
+
+    SAP sometimes sends a course with no lessons at all and the full list moments
+    later, and it has never been seen to send only part of a list. So a course that
+    comes back empty while the existing file has lessons for it is asked for again,
+    and if SAP still sends nothing, it keeps the lessons it had. Courses that come
+    back with lessons are always taken as they are, even if the lessons changed.
+    """
+    if not previous:
+        return
+
+    previous_lessons = {
+        course["general"]["מספר מקצוע"]: course["schedule"]
+        for course in previous
+        if course.get("schedule")
+    }
+
+    fetched_again = 0
+    kept = []
+    for course in result:
+        code = course["general"]["מספר מקצוע"]
+        if course["schedule"] or code not in previous_lessons:
+            continue
+
+        for _ in range(LOST_LESSONS_ATTEMPTS):
+            try:
+                schedule = get_course_schedule(year, semester, code)
+            except Exception as e:
+                print(f"Error: couldn't fetch lessons again for {code}: {e}")
+                schedule = []
+            if schedule:
+                course["schedule"] = schedule
+                fetched_again += 1
+                break
+        else:
+            course["schedule"] = previous_lessons[code]
+            kept.append(code)
+
+    if fetched_again or kept:
+        print(
+            f"Courses that came back with no lessons: {fetched_again} fetched again,"
+            f" {len(kept)} kept their previous lessons"
+            + (f" ({', '.join(kept[:10])}{'...' if len(kept) > 10 else ''})" if kept else "")
+        )
+
+
 def should_skip_write(previous: Optional[list], result: list) -> Optional[str]:
     """Decide whether a fresh scrape may replace the file already on disk.
 
@@ -1290,6 +1340,7 @@ def run(
 
     course_numbers = sorted(get_sap_course_numbers(year, semester))
     room_buildings, building_by_code = load_room_table(year, semester)
+    pool_init(session.proxies, room_buildings, building_by_code)
 
     with Pool(
         POOL_CONCURRENT_PROCESSES,
@@ -1304,6 +1355,10 @@ def run(
             )
         )
         result = list(tqdm(pool.imap(get_course_full_data_star, args), total=len(args)))
+
+    unfiltered_file = output_file.with_stem(f"{output_file.stem}.unfiltered")
+    previous_file = unfiltered_file if run_postprocessing and unfiltered_file.exists() else output_file
+    restore_lost_lessons(year, semester, result, read_existing_courses(previous_file))
 
     all_schedules_missing = all(len(x["schedule"]) == 0 for x in result)
 
