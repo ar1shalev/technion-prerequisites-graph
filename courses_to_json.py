@@ -877,6 +877,9 @@ def get_course_schedule(year: int, semester: int, course_number: str):
     return result
 
 
+KNOWN_EXAM_CATEGORIES = ["FI", "FB", "MI", "M2", "M3"]
+
+
 def get_exam_date_time(exam_data: list[dict[str, Any]], exam_category: str):
     if len(set(x["ZzExamOfferGuid"] for x in exam_data if x["ZzExamOfferGuid"])) != len(
         exam_data
@@ -915,8 +918,14 @@ def get_exam_date_time(exam_data: list[dict[str, Any]], exam_category: str):
 
     for exam in sorted(exam_data, key=exam_data_sort_key):
         if exam["CategoryCode"] != exam_category:
-            if exam["CategoryCode"] not in ["FI", "FB", "MI", "M2"]:
-                raise RuntimeError(f"Invalid category: {exam['CategoryCode']}")
+            # A category SAP adds later is left out of the data instead of
+            # failing the whole semester.
+            if exam["CategoryCode"] not in KNOWN_EXAM_CATEGORIES:
+                print(
+                    f"Warning: skipping unknown exam category"
+                    f" {exam['CategoryCode']}",
+                    flush=True,
+                )
             continue
 
         date_raw = exam["ExamDate"]
@@ -1150,7 +1159,7 @@ def get_course_full_data(year: int, semester: int, course_number: str):
         "מועד ג": "",  # TODO
         "בוחן מועד א": get_exam_date_time(exam_data, "MI"),
         "בוחן מועד ב": get_exam_date_time(exam_data, "M2"),
-        "בוחן מועד ג": "",  # TODO
+        "בוחן מועד ג": get_exam_date_time(exam_data, "M3"),
         "בוחן מועד ד": "",  # TODO
         "בוחן מועד ה": "",  # TODO
         "בוחן מועד ו": "",  # TODO
