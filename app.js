@@ -5,7 +5,7 @@ let faculties = [];
 let activeFaculties = new Set();
 let selectedCourseCode = null;
 let currentSemester = null;
-let viewMode = 'faculty'; // 'faculty' or 'local' or 'global'
+let viewMode = 'faculty'; // 'faculty' or 'local'
 let examFilter = 'all'; // 'all', 'has_exam', 'no_exam'
 let activeDays = new Set(); // Set of days
 let courseSemestersMap = new Map(); // code -> Set of semesters
@@ -18,7 +18,6 @@ let baseNodeFontSize = 10;
 let currentFilteredCourses = []; // courses that match criteria, excluding prereqs
 let modalShowPrereqs = false; // whether modal list includes prerequisite courses
 let savedView = null; // Stores position and scale before re-rendering
-let baselinePositions = null; // Stores original coordinates of nodes before compression
 
 function saveCurrentView() {
   if (network) {
@@ -29,7 +28,20 @@ function saveCurrentView() {
   }
 }
 
-let historicalCoursesInfo = new Map(); // code -> { name, faculty, points }
+let historicalCoursesInfo = new Map(); // code -> course object, from the most recent semester that offered it
+let historicalCourseSource = new Map(); // code -> { year, semester, label } that historicalCoursesInfo came from
+// code -> name, from the names SAP sends with each prerequisite. This is the only
+// source of a name for prerequisites that aren't offered in any semester we have.
+// A number's name doesn't depend on the semester, so this is never cleared.
+let prereqNames = new Map();
+
+function rememberPrereqNames(course) {
+  const names = course && course.general && course.general["שמות מקצועות קדם"];
+  if (!names) return;
+  for (const [code, name] of Object.entries(names)) {
+    if (name && !prereqNames.has(code)) prereqNames.set(code, name);
+  }
+}
 
 // Branch Hiding State
 let hiddenCourses = new Set();  // all explicitly hidden course codes
@@ -58,8 +70,8 @@ const FACULTY_COLORS = {
   "הפקולטה להנדסת מכונות": "#eab308", // Yellow
   "הפקולטה להנדסה אזרחית וסביבתית": "#10b981", // Emerald
   "הפקולטה להנדסת אווירונוטיקה וחלל": "#14b8a6", // Teal
-  "הפקולטה לרפואה": "#ef4444", // Red
-  "הפקולטה להנדסה ביו-רפואית": "#f43f5e", // Rose
+  "הפקולטה לרפואה": "#a16207", // Brown - not red, which marks external courses
+  "הפקולטה להנדסה ביו-רפואית": "#e5e7eb", // Pale grey - rose was too close to the external red
   "הפקולטה לביולוגיה": "#22c55e", // Green
   "הפקולטה לארכיטקטורה ובינוי ערים": "#84cc16", // Lime
   "המחלקה ללימודים הומניסטיים ואמנות": "#6b7280", // Gray
@@ -71,8 +83,146 @@ const FACULTY_COLORS = {
 
 const DEFAULT_COLOR = "#9ca3af";
 
+// Two different kinds of "not offered this semester", which used to look identical:
+// a course that runs in other semesters, and a course number that only ever shows up
+// inside somebody's prerequisite list.
+const OTHER_SEMESTER_STYLE = {
+  border: "#f59e0b", // Amber
+  background: "rgba(245, 158, 11, 0.10)",
+  highlightBackground: "rgba(245, 158, 11, 0.22)",
+  dashes: [6, 3],
+  fontLight: "#b45309",
+  fontDark: "#fcd34d"
+};
+
+const EXTERNAL_STYLE = {
+  border: "#ef4444", // Red
+  background: "rgba(239, 68, 68, 0.08)",
+  highlightBackground: "rgba(239, 68, 68, 0.2)",
+  dashes: [3, 3],
+  fontLight: "#b91c1c",
+  fontDark: "#fca5a5"
+};
+
 function getFacultyColor(facultyName) {
   return FACULTY_COLORS[facultyName] || DEFAULT_COLOR;
+}
+
+// Apply one of the two "not offered" looks to a node, so the three call sites can't drift apart
+function applyUnofferedNodeStyle(nodeObj, style, isLightTheme) {
+  nodeObj.color = {
+    background: style.background,
+    border: style.border,
+    highlight: { background: style.highlightBackground, border: style.border }
+  };
+  nodeObj.borderWidth = 1.5;
+  nodeObj.shapeProperties = { borderDashes: style.dashes };
+  nodeObj.font = {
+    color: isLightTheme ? style.fontLight : style.fontDark,
+    size: baseNodeFontSize - 0.5
+  };
+  return nodeObj;
+}
+
+// Course-responsible staff. Populated for roughly half the courses, and it changes
+// between semesters, so callers say which semester the value came from.
+function getResponsible(course) {
+  const raw = course && course.general && course.general["אחראים"];
+  if (!raw) return [];
+  const names = raw.split("\n").map(n => n.trim()).filter(n => n.length > 0);
+  return Array.from(new Set(names));
+}
+
+// Staff listed on the course's schedule rows of one type - the same names the
+// schedule cards show as "סגל". Filtering by type keeps tutors out of the lecturers.
+function getScheduleStaff(course, type) {
+  const names = [];
+  ((course && course.schedule) || []).forEach(item => {
+    if (item["סוג"] !== type || !item["מרצה/מתרגל"]) return;
+    item["מרצה/מתרגל"].split("\n").forEach(n => {
+      if (n.trim()) names.push(n.trim());
+    });
+  });
+  return Array.from(new Set(names));
+}
+
+function getLecturers(course) {
+  return getScheduleStaff(course, "הרצאה");
+}
+
+// Who to show for a course. אחראים is empty for about half the courses as SAP
+// returns them, so fall back to the lecturers, then - for lab-only courses - the
+// lab staff, each labelled as what it is.
+function getCourseStaff(course) {
+  const responsible = getResponsible(course);
+  if (responsible.length > 0) return { label: "אחראי/ת הקורס", names: responsible };
+
+  const lecturers = getLecturers(course);
+  if (lecturers.length > 0) return { label: "מרצים", names: lecturers };
+
+  const labStaff = getScheduleStaff(course, "מעבדה");
+  if (labStaff.length > 0) return { label: "סגל מעבדה", names: labStaff };
+
+  return { label: "אחראי/ת הקורס", names: [] };
+}
+
+function courseDisplayName(code) {
+  const course = coursesMap.get(code) || historicalCoursesInfo.get(code);
+  if (course) return course.general["שם מקצוע"];
+  return prereqNames.get(code) || code;
+}
+
+// One tooltip builder for all four node kinds, so the three places that build nodes
+// can't drift apart. Vis.js renders this as plain text, newline separated.
+// kind: 'offered' | 'supporting' | 'other-semester' | 'external'
+function buildNodeTooltip(code, kind) {
+  const lines = [];
+  const course = (kind === 'other-semester')
+    ? historicalCoursesInfo.get(code)
+    : coursesMap.get(code);
+
+  if (!course) {
+    const name = prereqNames.get(code);
+    lines.push(name ? `${code} - ${name}` : code);
+    lines.push("קורס חיצוני — לא נמצא באף סמסטר בנתונים");
+    const requiredBy = Array.from(revAdjList.get(code) || []);
+    if (requiredBy.length > 0) {
+      const shown = requiredBy.slice(0, 4).map(courseDisplayName);
+      const rest = requiredBy.length - shown.length;
+      lines.push(`נדרש עבור: ${shown.join(", ")}${rest > 0 ? ` ועוד ${rest}` : ""}`);
+    }
+    return lines.join("\n");
+  }
+
+  const gen = course.general;
+  lines.push(`${code} - ${gen["שם מקצוע"]}`);
+
+  let facultyLine = gen["פקולטה"];
+  if (kind === 'supporting') facultyLine += " (דרישת קדם תומכת)";
+  else if (kind === 'other-semester') facultyLine += " (לא מוצע הסמסטר)";
+  lines.push(facultyLine);
+
+  lines.push(`נקודות: ${gen["נקודות"]}`);
+
+  const staff = getCourseStaff(course);
+  if (staff.names.length > 0) {
+    lines.push(`${staff.label}: ${staff.names.join(", ")}`);
+  }
+
+  if (kind === 'other-semester') {
+    const source = historicalCourseSource.get(code);
+    if (source) {
+      lines.push(`המידע מסמסטר ${source.label} — ייתכן שישתנה`);
+    }
+    const offered = courseSemestersMap.get(code);
+    if (offered && offered.size > 0) {
+      lines.push(`נלמד ב: ${Array.from(offered).join(", ")}`);
+    }
+  } else if (gen["מועד א"]) {
+    lines.push(`מועד א: ${gen["מועד א"].split("\n")[0]}`);
+  }
+
+  return lines.join("\n");
 }
 
 // Initialization on DOM load
@@ -82,6 +232,18 @@ document.addEventListener("DOMContentLoaded", () => {
   loadAllSemestersIndex(); // Load the semesters mapping in background
 });
 
+// One label format for "which semester", so the dropdown, the offerings map and the
+// details panel can't disagree. Winter straddles two calendar years; spring and summer
+// fall entirely in the second one.
+function semesterLabel(year, semester) {
+  const y = parseInt(year, 10);
+  const s = parseInt(semester, 10);
+  if (s === 200) return `חורף ${y}/${y + 1}`;
+  if (s === 201) return `אביב ${y + 1}`;
+  if (s === 202) return `קיץ ${y + 1}`;
+  return `${y}-${s}`;
+}
+
 // Load all semesters in the background to build the offerings map
 async function loadAllSemestersIndex() {
   try {
@@ -89,20 +251,14 @@ async function loadAllSemestersIndex() {
     if (!response.ok) return;
     const semesters = await response.json();
 
+    courseSemestersMap.clear();
+    historicalCoursesInfo.clear();
+    historicalCourseSource.clear();
+
     // Load all in background
     const promises = semesters.map(async (sem) => {
       const key = `${sem.year}-${sem.semester}`;
-      let semName = "";
-      if (sem.semester === 200) semName = "חורף";
-      else if (sem.semester === 201) semName = "אביב";
-      else if (sem.semester === 202) semName = "קיץ";
-      // For winter semesters, include both years to avoid confusion
-      let label;
-      if (sem.semester === 200) {
-        label = `${semName} ${sem.year}/${sem.year + 1}`;
-      } else {
-        label = `${semName} ${sem.year + 1}`;
-      }
+      const label = semesterLabel(sem.year, sem.semester);
 
       try {
         const res = await fetch(`data/courses_${sem.year}_${sem.semester}.json`);
@@ -110,15 +266,23 @@ async function loadAllSemestersIndex() {
           const data = await res.json();
           data.forEach(course => {
             const code = course.general && course.general["מספר מקצוע"];
+            rememberPrereqNames(course);
             if (code) {
               if (!courseSemestersMap.has(code)) {
                 courseSemestersMap.set(code, new Set());
               }
               courseSemestersMap.get(code).add(label);
 
-              // Cache historical course info
-              if (!historicalCoursesInfo.has(code)) {
+              // Keep the most recent semester's copy. Staff, schedule and exam dates all
+              // change between semesters, so it matters which one we cached — these
+              // fetches finish in arbitrary order, so compare instead of taking the first.
+              const cached = historicalCourseSource.get(code);
+              const isNewer = !cached
+                || sem.year > cached.year
+                || (sem.year === cached.year && sem.semester > cached.semester);
+              if (isNewer) {
                 historicalCoursesInfo.set(code, course);
+                historicalCourseSource.set(code, { year: sem.year, semester: sem.semester, label });
               }
             }
           });
@@ -130,7 +294,7 @@ async function loadAllSemestersIndex() {
 
     await Promise.all(promises);
     
-    // Rebuild graph now that we have all historical courses, to include their prerequisites in the global adjacency list
+    // Rebuild graph now that we have all historical courses, to include their prerequisites in the adjacency lists
     buildGraph();
     renderGraph();
     
@@ -231,6 +395,7 @@ function processCoursesData() {
     if (gen && gen["מספר מקצוע"]) {
       const code = gen["מספר מקצוע"];
       coursesMap.set(code, course);
+      rememberPrereqNames(course);
 
       if (gen["פקולטה"]) {
         uniqueFaculties.add(gen["פקולטה"].trim());
@@ -260,12 +425,139 @@ function processCoursesData() {
   }
 }
 
-// Extract course codes from prerequisite string
+// Extract course codes from prerequisite string.
+// The graph deliberately keeps using this flat list: an edge from every mentioned
+// course is the conservative choice for a visualisation. Only the sidebar cares
+// about the and/or structure, and that goes through parsePrereqTree below.
 function parsePrerequisites(prereqStr) {
   if (!prereqStr) return [];
   // Matches 8-digit numbers representing course codes
   const matches = prereqStr.match(/\b\d{8}\b/g);
   return matches ? Array.from(new Set(matches)) : [];
+}
+
+// Split a prerequisite string into its tokens.
+// Note the asymmetry in the source data: "או" is surrounded by spaces, while "ו-"
+// runs straight into the course number after it ("00140143 ו-00140149").
+function tokenizePrereqs(prereqStr) {
+  const tokens = [];
+  let i = 0;
+
+  while (i < prereqStr.length) {
+    const rest = prereqStr.slice(i);
+
+    const space = rest.match(/^\s+/);
+    if (space) {
+      i += space[0].length;
+      continue;
+    }
+
+    if (rest[0] === "(" || rest[0] === ")") {
+      tokens.push({ type: rest[0] });
+      i += 1;
+      continue;
+    }
+
+    const code = rest.match(/^\d{8}/);
+    if (code) {
+      tokens.push({ type: "code", value: code[0] });
+      i += code[0].length;
+      continue;
+    }
+
+    if (rest.startsWith("ו-")) {
+      tokens.push({ type: "and" });
+      i += 2;
+      continue;
+    }
+
+    if (rest.startsWith("או")) {
+      tokens.push({ type: "or" });
+      i += 2;
+      continue;
+    }
+
+    return null; // Something we don't recognise - the caller falls back to a flat list
+  }
+
+  return tokens;
+}
+
+// Parse a prerequisite string into an and/or tree, cheesefork style, so alternative
+// groups can be shown apart from each other instead of as one undifferentiated list.
+// Returns {op:'and'|'or', children:[...]} or {code:'...'}, or null if the string
+// doesn't parse - callers must handle null, since this field is free-form SAP output.
+function parsePrereqTree(prereqStr) {
+  if (!prereqStr) return null;
+
+  const tokens = tokenizePrereqs(prereqStr);
+  if (!tokens || tokens.length === 0) return null;
+
+  let pos = 0;
+
+  // Same-op children get flattened, and a group of one is just that one thing
+  function group(op, children) {
+    const flat = [];
+    children.forEach(child => {
+      if (child.op === op) flat.push(...child.children);
+      else flat.push(child);
+    });
+    return flat.length === 1 ? flat[0] : { op, children: flat };
+  }
+
+  // "and" binds tighter than "or", so "A ו-B או C" reads as "(A and B) or C"
+  function parseExpr() {
+    const children = [parseTerm()];
+    if (children[0] === null) return null;
+
+    while (pos < tokens.length && tokens[pos].type === "or") {
+      pos += 1;
+      const next = parseTerm();
+      if (next === null) return null;
+      children.push(next);
+    }
+
+    return group("or", children);
+  }
+
+  function parseTerm() {
+    const children = [parseFactor()];
+    if (children[0] === null) return null;
+
+    while (pos < tokens.length && tokens[pos].type === "and") {
+      pos += 1;
+      const next = parseFactor();
+      if (next === null) return null;
+      children.push(next);
+    }
+
+    return group("and", children);
+  }
+
+  function parseFactor() {
+    const token = tokens[pos];
+    if (!token) return null;
+
+    if (token.type === "code") {
+      pos += 1;
+      return { code: token.value };
+    }
+
+    if (token.type === "(") {
+      pos += 1;
+      const inner = parseExpr();
+      if (inner === null) return null;
+      if (!tokens[pos] || tokens[pos].type !== ")") return null;
+      pos += 1;
+      return inner;
+    }
+
+    return null;
+  }
+
+  const tree = parseExpr();
+  if (tree === null || pos !== tokens.length) return null;
+  return tree;
 }
 
 // Build adjacency lists for graph traversal
@@ -382,11 +674,31 @@ function populateFacultiesPanel() {
   updateLegend();
 }
 
+// Add one swatch + caption row to the legend
+function addLegendSwatch(container, { background, border, dashed, text }) {
+  const item = document.createElement("div");
+  item.className = "legend-item";
+
+  const swatch = document.createElement("span");
+  swatch.className = "legend-color";
+  swatch.style.backgroundColor = background;
+  swatch.style.border = `1.5px ${dashed ? "dashed" : "solid"} ${border}`;
+  swatch.style.borderRadius = "4px";
+
+  const label = document.createElement("span");
+  label.className = "legend-label";
+  label.textContent = text;
+
+  item.appendChild(swatch);
+  item.appendChild(label);
+  container.appendChild(item);
+}
+
 function updateLegend() {
   const container = document.getElementById("legend-items");
   container.innerHTML = "";
 
-  // 1. Course status section (offered / supporting / external)
+  // 1. Course status section
   const statusHeader = document.createElement("div");
   statusHeader.className = "legend-title";
   statusHeader.style.borderBottom = "none";
@@ -395,50 +707,33 @@ function updateLegend() {
   statusHeader.textContent = "סטטוס הקורסים בסמסטר זה:";
   container.appendChild(statusHeader);
 
-  // Normal Offered course
-  const normItem = document.createElement("div");
-  normItem.className = "legend-item";
-  const normColor = document.createElement("span");
-  normColor.className = "legend-color";
-  normColor.style.backgroundColor = "rgba(255, 255, 255, 0.08)";
-  normColor.style.border = "1.5px solid #8b5cf6";
-  normColor.style.borderRadius = "4px";
-  const normLabel = document.createElement("span");
-  normLabel.className = "legend-label";
-  normLabel.textContent = "קורס מוצע בסמסטר הנוכחי (גבול מוצק)";
-  normItem.appendChild(normColor);
-  normItem.appendChild(normLabel);
-  container.appendChild(normItem);
+  addLegendSwatch(container, {
+    background: "rgba(255, 255, 255, 0.08)",
+    border: "#8b5cf6",
+    dashed: false,
+    text: "קורס מוצע בסמסטר הנוכחי (גבול מוצק בצבע הפקולטה)"
+  });
 
-  // Supporting Prerequisite from other faculty
-  const supportItem = document.createElement("div");
-  supportItem.className = "legend-item";
-  const supportColor = document.createElement("span");
-  supportColor.className = "legend-color";
-  supportColor.style.backgroundColor = "rgba(10, 10, 15, 0.95)";
-  supportColor.style.border = "1.5px dashed #8b5cf6";
-  supportColor.style.borderRadius = "4px";
-  const supportLabel = document.createElement("span");
-  supportLabel.className = "legend-label";
-  supportLabel.textContent = "דרישת קדם מפקולטה אחרת (גבול מקווקו)";
-  supportItem.appendChild(supportColor);
-  supportItem.appendChild(supportLabel);
-  container.appendChild(supportItem);
+  addLegendSwatch(container, {
+    background: "rgba(10, 10, 15, 0.95)",
+    border: "#8b5cf6",
+    dashed: true,
+    text: "דרישת קדם מפקולטה אחרת (גבול מקווקו בצבע הפקולטה)"
+  });
 
-  // External course (not offered)
-  const extItem = document.createElement("div");
-  extItem.className = "legend-item";
-  const extColor = document.createElement("span");
-  extColor.className = "legend-color";
-  extColor.style.backgroundColor = "rgba(239, 68, 68, 0.08)";
-  extColor.style.border = "1.5px dashed #ef4444";
-  extColor.style.borderRadius = "4px";
-  const extLabel = document.createElement("span");
-  extLabel.className = "legend-label";
-  extLabel.textContent = "קורס חיצוני - לא מוצע (גבול אדום)";
-  extItem.appendChild(extColor);
-  extItem.appendChild(extLabel);
-  container.appendChild(extItem);
+  addLegendSwatch(container, {
+    background: OTHER_SEMESTER_STYLE.background,
+    border: OTHER_SEMESTER_STYLE.border,
+    dashed: true,
+    text: "מוצע בסמסטר אחר, לא בנוכחי (גבול כתום)"
+  });
+
+  addLegendSwatch(container, {
+    background: EXTERNAL_STYLE.background,
+    border: EXTERNAL_STYLE.border,
+    dashed: true,
+    text: "קורס חיצוני - לא נמצא באף סמסטר בנתונים (גבול אדום)"
+  });
 
   // 2. Faculty colors section
   const colorHeader = document.createElement("div");
@@ -734,6 +1029,7 @@ function generateGraphData() {
       } else {
         const hist = historicalCoursesInfo.get(code);
         if (hist) labelText = wrapText(hist.general["שם מקצוע"], 15);
+        else if (prereqNames.has(code)) labelText = wrapText(prereqNames.get(code), 15);
       }
 
       let nodeObj = {
@@ -745,8 +1041,7 @@ function generateGraphData() {
 
       if (course) {
         const fac = course.general["פקולטה"];
-        const name = course.general["שם מקצוע"];
-        nodeObj.title = `${code} - ${name}\n${fac}\nנקודות: ${course.general["נקודות"]}`;
+        nodeObj.title = buildNodeTooltip(code, 'offered');
 
         if (isSelected) {
           nodeObj.color = {
@@ -764,17 +1059,14 @@ function generateGraphData() {
           };
           nodeObj.borderWidth = 2; // Thicker solid border for offered course
         }
+      } else if (historicalCoursesInfo.has(code)) {
+        // Runs in other semesters, just not this one - amber
+        nodeObj.title = buildNodeTooltip(code, 'other-semester');
+        applyUnofferedNodeStyle(nodeObj, OTHER_SEMESTER_STYLE, isLightTheme);
       } else {
-        // External node (not offered this semester) - Colored Red
-        nodeObj.title = `${code}\nקורס חיצוני (לא מוצע הסמסטר)`;
-        nodeObj.color = {
-          background: 'rgba(239, 68, 68, 0.08)',
-          border: '#ef4444',
-          highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' }
-        };
-        nodeObj.borderWidth = 1.5;
-        nodeObj.shapeProperties = { borderDashes: [3, 3] };
-        nodeObj.font = { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 };
+        // Only ever seen inside a prerequisite list - red
+        nodeObj.title = buildNodeTooltip(code, 'external');
+        applyUnofferedNodeStyle(nodeObj, EXTERNAL_STYLE, isLightTheme);
       }
 
       nodes.push(nodeObj);
@@ -831,7 +1123,7 @@ function generateGraphData() {
     });
 
   } else {
-    // Apply advanced filters and faculty/global constraints
+    // Apply advanced filters and faculty constraints
     let coreCourses = currentFilteredCourses.map(c => c.general["מספר מקצוע"]);
 
     // Add all core courses to the node list
@@ -846,7 +1138,7 @@ function generateGraphData() {
         const nodeObj = {
           id: code,
           label: wrapText(name, 15),
-          title: `${code} - ${name}\n${fac}\nנקודות: ${course.general["נקודות"]}`,
+          title: buildNodeTooltip(code, 'offered'),
           color: {
             background: isSelected ? hexToRgba(getFacultyColor(fac), 0.8) : hexToRgba(getFacultyColor(fac), isLightTheme ? 0.15 : 0.25),
             border: isSelected ? (isLightTheme ? '#111827' : '#ffffff') : getFacultyColor(fac),
@@ -863,25 +1155,16 @@ function generateGraphData() {
         nodes.push(nodeObj);
         addedNodes.add(code);
       } else {
-        // It's a historical course (not offered this semester)
+        // Runs in other semesters, just not this one
         const hist = historicalCoursesInfo.get(code);
         if (hist) {
-          const fac = hist.general["פקולטה"];
-          const name = hist.general["שם מקצוע"];
           const nodeObj = {
             id: code,
-            label: wrapText(name, 15),
-            title: `${code} - ${name}\n${fac} (לא מוצע הסמסטר)\nנקודות: ${hist.general["נקודות"]}`,
-            color: {
-              background: 'rgba(239, 68, 68, 0.08)', // transparent red
-              border: '#ef4444', // bright red
-              highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' }
-            },
-            borderWidth: 1.5,
-            shapeProperties: { borderDashes: [3, 3] },
-            font: { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 },
+            label: wrapText(hist.general["שם מקצוע"], 15),
+            title: buildNodeTooltip(code, 'other-semester'),
             shadow: isSelected ? { enabled: true, color: isLightTheme ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.4)', size: 10 } : false
           };
+          applyUnofferedNodeStyle(nodeObj, OTHER_SEMESTER_STYLE, isLightTheme);
           nodes.push(nodeObj);
           addedNodes.add(code);
         }
@@ -896,7 +1179,12 @@ function generateGraphData() {
           if (!addedNodes.has(pre)) {
             // pre is in another faculty (supporting node)
             const course = coursesMap.get(pre);
-            if (!course && !showExternalCourses) {
+            const hist = course ? null : historicalCoursesInfo.get(pre);
+            // Each of the two "not offered" kinds answers to its own checkbox
+            if (hist && !showAllHistoricalCourses) {
+              return;
+            }
+            if (!course && !hist && !showExternalCourses) {
               return;
             }
             let nodeObj = {
@@ -908,7 +1196,7 @@ function generateGraphData() {
             if (course) {
               const fac = course.general["פקולטה"];
               nodeObj.label = wrapText(course.general["שם מקצוע"], 15);
-              nodeObj.title = `${pre} - ${course.general["שם מקצוע"]}\n${fac} (דרישת קדם תומכת)\nנקודות: ${course.general["נקודות"]}`;
+              nodeObj.title = buildNodeTooltip(pre, 'supporting');
               // Supporting node style: dark background, dashed colored border, muted text
               nodeObj.color = {
                 background: isLightTheme ? 'rgba(240, 240, 245, 0.95)' : 'rgba(10, 10, 15, 0.95)',
@@ -921,18 +1209,16 @@ function generateGraphData() {
               nodeObj.borderWidth = 2;
               nodeObj.shapeProperties = { borderDashes: [4, 4] };
               nodeObj.font = { color: isLightTheme ? '#4b5563' : '#a1a1aa', size: baseNodeFontSize - 0.5 };
+            } else if (hist) {
+              // Runs in other semesters, just not this one
+              nodeObj.label = wrapText(hist.general["שם מקצוע"], 15);
+              nodeObj.title = buildNodeTooltip(pre, 'other-semester');
+              applyUnofferedNodeStyle(nodeObj, OTHER_SEMESTER_STYLE, isLightTheme);
             } else {
-              // External node - Colored Red
-              nodeObj.label = pre;
-              nodeObj.title = `${pre}\nקורס חיצוני (לא מוצע הסמסטר)`;
-              nodeObj.color = {
-                background: 'rgba(239, 68, 68, 0.08)',
-                border: '#ef4444',
-                highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' }
-              };
-              nodeObj.borderWidth = 1.5;
-              nodeObj.shapeProperties = { borderDashes: [3, 3] };
-              nodeObj.font = { color: isLightTheme ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 };
+              // Only ever seen inside a prerequisite list
+              nodeObj.label = prereqNames.has(pre) ? wrapText(prereqNames.get(pre), 15) : pre;
+              nodeObj.title = buildNodeTooltip(pre, 'external');
+              applyUnofferedNodeStyle(nodeObj, EXTERNAL_STYLE, isLightTheme);
             }
 
             nodes.push(nodeObj);
@@ -993,7 +1279,6 @@ function generateGraphData() {
 
 // Render Graph using Vis.js
 function renderGraph() {
-  baselinePositions = null;
   const container = document.getElementById("network-canvas");
   const { nodes, edges } = generateGraphData();
 
@@ -1017,11 +1302,13 @@ function renderGraph() {
         iterations: 120,
         updateInterval: 25
       },
+      // The dense setting pulls nodes closer together, but avoidOverlap still
+      // keeps the boxes off each other so the labels stay readable.
       barnesHut: {
-        gravitationalConstant: useCompression ? -6000 : -12000,
-        centralGravity: 0.1,
-        springLength: useCompression ? 120 : 220,
-        springConstant: 0.02,
+        gravitationalConstant: useCompression ? -4500 : -12000,
+        centralGravity: useCompression ? 0.25 : 0.1,
+        springLength: useCompression ? 110 : 220,
+        springConstant: useCompression ? 0.03 : 0.02,
         damping: 0.09,
         avoidOverlap: 1
       }
@@ -1109,8 +1396,6 @@ function renderGraph() {
       // Disable physics to prevent jitter after stabilization
       network.setOptions({ physics: { enabled: false } });
     }
-    baselinePositions = network.getPositions();
-    applyCompression();
     if (savedView) {
       network.moveTo({
         position: savedView.position,
@@ -1124,8 +1409,6 @@ function renderGraph() {
   // Trigger fit to screen on loaded
   if (viewMode === 'local' || useHierarchicalLayout) {
     setTimeout(() => {
-      baselinePositions = network.getPositions();
-      applyCompression();
       if (savedView) {
         network.moveTo({
           position: savedView.position,
@@ -1249,37 +1532,36 @@ function updateDetailsPanel() {
   const isOfferedThisSemester = coursesMap.has(selectedCourseCode);
 
   if (!course) {
-    // Pure external (not even historical)
-    const facultyColor = "#4b5563";
-    const titleText = "קורס חיצוני";
-    const facText = "חיצוני";
-    const ptsText = "לא ידוע";
-
-    const offeredSems = courseSemestersMap.get(selectedCourseCode);
-    const semsText = offeredSems ? Array.from(offeredSems).join(", ") : "לא נמצאו סמסטרים";
+    // Only ever seen inside a prerequisite list - nothing is known about it beyond
+    // the fact that other courses require it.
+    const facultyColor = EXTERNAL_STYLE.border;
+    const requiredBy = Array.from(revAdjList.get(selectedCourseCode) || []);
+    const requiredByText = requiredBy.length > 0
+      ? requiredBy.map(courseDisplayName).join(", ")
+      : "אינו מופיע כדרישת קדם של קורס כלשהו";
 
     container.innerHTML = `
       <div class="course-card" style="--faculty-color: ${facultyColor}">
         <div class="course-card-header">
-          <h2 class="course-card-title">${titleText}</h2>
+          <h2 class="course-card-title">${prereqNames.get(selectedCourseCode) || "קורס חיצוני"}</h2>
           <div class="course-card-code">${selectedCourseCode}</div>
         </div>
         <div class="course-meta-grid">
           <div class="meta-item">
             <span class="meta-label">פקולטה</span>
-            <span class="meta-value">${facText}</span>
+            <span class="meta-value">לא ידוע</span>
           </div>
           <div class="meta-item">
             <span class="meta-label">נקודות</span>
-            <span class="meta-value points-badge">${ptsText}</span>
+            <span class="meta-value points-badge">לא ידוע</span>
           </div>
           <div class="meta-item" style="grid-column: span 2; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px;">
-            <span class="meta-label">סמסטרים שבהם נלמד (בשלוש השנים האחרונות)</span>
-            <span class="meta-value" style="color: var(--secondary); font-weight: 500; font-size: 12.5px;">${semsText}</span>
+            <span class="meta-label">נדרש עבור</span>
+            <span class="meta-value" style="color: var(--secondary); font-weight: 500; font-size: 12.5px;">${requiredByText}</span>
           </div>
         </div>
         <p style="font-size: 13px; color: var(--text-secondary); margin-top: 15px; line-height: 1.4;">
-          קורס זה לא הוצע בטכניון בשלוש השנים האחרונות או שהוא קורס חיצוני.
+          מספר הקורס מופיע כדרישת קדם, אך הקורס עצמו לא נמצא באף אחד מהסמסטרים שבנתונים. ייתכן שמדובר בקורס ישן, בקורס ממוסד אחר, או בקורס שהוחלף במספר חדש.
         </p>
         <div class="card-actions" style="display: flex; gap: 8px; margin-top: 10px;">
           <button class="btn btn-primary" onclick="toggleLocalView(true)" style="width: 100%;">
@@ -1320,14 +1602,48 @@ function updateDetailsPanel() {
   const hasExam = (gen["מועד א"] || gen["מועד ב"]) ? "כן" : "לא";
 
   // Get semesters in which this course is offered
-  let currentSemName = "";
   const [curYear, curSem] = currentSemester.split("-");
-  if (curSem === "200") currentSemName = `חורף ${curYear}/${parseInt(curYear) + 1}`;
-  else if (curSem === "201") currentSemName = `אביב ${curYear}`;
-  else if (curSem === "202") currentSemName = `קיץ ${curYear}`;
+  const currentSemName = semesterLabel(curYear, curSem);
 
   const offeredSems = courseSemestersMap.get(selectedCourseCode);
   const semsText = offeredSems ? Array.from(offeredSems).join(", ") : currentSemName;
+
+  // Which semester the details below actually describe. Staff, schedule and exam dates
+  // all change between semesters, so say so rather than implying it's current.
+  const dataSource = historicalCourseSource.get(selectedCourseCode);
+  const dataSemName = isOfferedThisSemester
+    ? currentSemName
+    : (dataSource ? dataSource.label : currentSemName);
+
+  const staleBanner = isOfferedThisSemester ? '' : `
+      <div style="font-size: 12.5px; color: var(--warning); background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; line-height: 1.4;">
+        <i class="fa-solid fa-clock-rotate-left"></i>
+        הקורס אינו מוצע בסמסטר ${currentSemName}. הפרטים להלן הם מסמסטר ${dataSemName} וייתכן שישתנו.
+      </div>
+  `;
+
+  // Course-responsible staff, which changes between semesters
+  const staff = getCourseStaff(course);
+  const staffText = staff.names.length > 0 ? staff.names.join(", ") : "לא פורסם";
+
+  // Prefer the grouped and/or view. A handful of courses have malformed prerequisite
+  // strings that don't parse, and those fall back to the old flat list.
+  const prereqTree = parsePrereqTree(gen["מקצועות קדם"]);
+  let prereqBody;
+  if (displayPrereqs.length === 0) {
+    prereqBody = '<div class="req-empty">אין דרישות ישירות</div>';
+  } else if (prereqTree) {
+    prereqBody = renderPrereqTree(prereqTree);
+  } else {
+    prereqBody = `<div class="req-list">${displayPrereqs.map(renderReqLink).join('')}</div>`;
+  }
+
+  const rawPrereqRow = gen["מקצועות קדם"] ? `
+        <details class="req-raw">
+          <summary>לוגיקת הדרישה כפי שמופיעה במערכת</summary>
+          <span class="req-raw-value">${gen["מקצועות קדם"]}</span>
+        </details>
+  ` : '';
 
   let html = `
     <!-- Course Title & Code -->
@@ -1336,6 +1652,7 @@ function updateDetailsPanel() {
         <h2 class="course-card-title">${gen["שם מקצוע"]}</h2>
         <div class="course-card-code">${selectedCourseCode}</div>
       </div>
+      ${staleBanner}
       <div class="course-meta-grid">
         <div class="meta-item">
           <span class="meta-label">פקולטה</span>
@@ -1354,7 +1671,11 @@ function updateDetailsPanel() {
           <span class="meta-value" style="color: ${hasExam === 'כן' ? 'var(--warning)' : 'var(--accent)'}; font-weight: bold;">${hasExam}</span>
         </div>
         <div class="meta-item" style="grid-column: span 2; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px;">
-          <span class="meta-label">סמסטרים שבהם נלמד (בשלוש השנים האחרונות)</span>
+          <span class="meta-label">${staff.label} (סמסטר ${dataSemName})</span>
+          <span class="meta-value" style="font-weight: 500; font-size: 12.5px; ${staff.names.length > 0 ? '' : 'color: var(--text-muted); font-style: italic;'}">${staffText}</span>
+        </div>
+        <div class="meta-item" style="grid-column: span 2; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px;">
+          <span class="meta-label">סמסטרים שבהם נלמד</span>
           <span class="meta-value" style="color: var(--secondary); font-weight: 500; font-size: 12.5px;">${semsText}</span>
         </div>
       </div>
@@ -1377,10 +1698,8 @@ function updateDetailsPanel() {
         <i class="fa-solid fa-chevron-up chevron"></i>
       </div>
       <div class="info-section-content">
-        ${gen["מקצועות קדם"] ? `<div style="font-weight: 500; margin-bottom: 12px; color: var(--text-primary);">לוגיקת דרישה: <span style="font-family: var(--font-he); color: var(--warning);">${gen["מקצועות קדם"]}</span></div>` : ''}
-        <div class="req-list">
-          ${displayPrereqs.length > 0 ? displayPrereqs.map(code => renderReqLink(code)).join('') : '<div class="req-empty">אין דרישות ישירות</div>'}
-        </div>
+        ${prereqBody}
+        ${rawPrereqRow}
       </div>
     </div>
 
@@ -1574,22 +1893,104 @@ function updateDetailsPanel() {
   container.innerHTML = html;
 }
 
-// Render small link card for prereqs/unlocks lists
+// Render small link card for prereqs/unlocks lists. The border colour matches the
+// node colours in the graph, so the three statuses read the same in both places.
 function renderReqLink(code) {
   const target = coursesMap.get(code);
-  let name = "קורס חיצוני/לא מוצע";
+  let name;
+  let accent = "";
+
   if (target) {
     name = target.general["שם מקצוע"];
   } else {
     const hist = historicalCoursesInfo.get(code);
     if (hist) {
       name = hist.general["שם מקצוע"] + " (לא מוצע הסמסטר)";
+      accent = OTHER_SEMESTER_STYLE.border;
+    } else {
+      name = prereqNames.has(code)
+        ? `${prereqNames.get(code)} (קורס חיצוני)`
+        : "קורס חיצוני - לא נמצא בנתונים";
+      accent = EXTERNAL_STYLE.border;
     }
   }
+
+  const accentStyle = accent ? ` style="border-right: 3px solid ${accent};"` : "";
   return `
-    <div class="req-link" onclick="selectCourse('${code}')">
+    <div class="req-link" onclick="selectCourse('${code}')"${accentStyle}>
       <span class="req-link-text" title="${name}">${name}</span>
       <span class="req-link-code">${code}</span>
+    </div>
+  `;
+}
+
+// Render a run of sibling nodes joined by `op`: consecutive plain courses share one
+// card list, while a nested group gets its own boxed section with the operator
+// spelled out between the parts.
+function renderPrereqChildren(children, op) {
+  const segments = [];
+  let pending = [];
+
+  const flush = () => {
+    if (pending.length === 0) return;
+    segments.push(`<div class="req-list">${pending.map(renderReqLink).join("")}</div>`);
+    pending = [];
+  };
+
+  children.forEach(child => {
+    if (child.code) {
+      pending.push(child.code);
+    } else {
+      flush();
+      const isOr = child.op === "or";
+      segments.push(`
+        <div class="req-subgroup ${isOr ? "req-subgroup-or" : "req-subgroup-and"}">
+          <div class="req-subgroup-title">${isOr ? "אחד מהבאים" : "כל הבאים"}</div>
+          ${renderPrereqChildren(child.children, child.op)}
+        </div>
+      `);
+    }
+  });
+
+  flush();
+  return segments.join(`<div class="req-join">${op === "or" ? "או" : "וגם"}</div>`);
+}
+
+// Render the and/or tree so alternative groups read as separate options rather
+// than one undifferentiated list of courses.
+function renderPrereqTree(tree) {
+  if (!tree) return "";
+
+  if (tree.code) {
+    return `<div class="req-list">${renderReqLink(tree.code)}</div>`;
+  }
+
+  if (tree.op === "and") {
+    return `
+      <div class="req-group">
+        <div class="req-group-title">נדרשים <strong>כל</strong> הקורסים הבאים:</div>
+        ${renderPrereqChildren(tree.children, "and")}
+      </div>
+    `;
+  }
+
+  // When every alternative is a single course, the boxes and "אפשרות N" badges are
+  // more noise than help - just the cards with "או" between them is clearer.
+  const allSingle = tree.children.every(child => child.code);
+
+  const options = tree.children.map((child, index) => `
+    <div class="req-option${allSingle ? " req-option-plain" : ""}">
+      ${allSingle ? "" : `<div class="req-option-badge">אפשרות ${index + 1}</div>`}
+      ${child.code
+        ? `<div class="req-list">${renderReqLink(child.code)}</div>`
+        : renderPrereqChildren(child.children, "and")}
+    </div>
+  `).join("");
+
+  return `
+    <div class="req-group">
+      <div class="req-group-title">מספיק להשלים <strong>אחת</strong> מהאפשרויות הבאות:</div>
+      ${options}
     </div>
   `;
 }
@@ -1691,29 +2092,12 @@ function restoreFacultyFilters() {
   savedFacultyFilters = null;
 }
 
-// Hide/show the change layout button based on active viewMode
+// The focused tree forces its own hierarchical layout, so the toggle only applies to the faculty graph
 function updateLayoutToggleBtnVisibility() {
   const btn = document.getElementById("layout-toggle-btn");
   if (btn) {
-    btn.style.display = (viewMode === 'faculty') ? 'flex' : 'none';
+    btn.style.display = (viewMode !== 'local') ? 'flex' : 'none';
   }
-}
-
-// Scale coordinates in-place to compress/decompress the layout without shuffling node locations
-function applyCompression() {
-  if (!network || !baselinePositions) return;
-  const factor = useCompression ? 0.6 : 1.0;
-  const updates = [];
-  for (const id in baselinePositions) {
-    if (networkNodes.get(id) !== null) {
-      updates.push({
-        id: id,
-        x: baselinePositions[id].x * factor,
-        y: baselinePositions[id].y * factor
-      });
-    }
-  }
-  networkNodes.update(updates);
 }
 
 // Dynamic font resizing in-place without rebuilding the network
@@ -1754,13 +2138,11 @@ function toggleLocalView(enableLocal) {
     viewMode = 'local';
     document.getElementById("btn-view-local").classList.add("active");
     document.getElementById("btn-view-faculty").classList.remove("active");
-    document.getElementById("btn-view-global").classList.remove("active");
     resetFiltersToInclusive();
   } else {
     viewMode = 'faculty';
     document.getElementById("btn-view-faculty").classList.add("active");
     document.getElementById("btn-view-local").classList.remove("active");
-    document.getElementById("btn-view-global").classList.remove("active");
     restoreFacultyFilters();
   }
   updateLayoutToggleBtnVisibility();
@@ -1874,7 +2256,6 @@ function setupEventListeners() {
     viewMode = 'faculty';
     document.getElementById("btn-view-faculty").classList.add("active");
     document.getElementById("btn-view-local").classList.remove("active");
-    document.getElementById("btn-view-global").classList.remove("active");
     if (wasLocal) {
       restoreFacultyFilters();
     }
@@ -1888,15 +2269,6 @@ function setupEventListeners() {
       return;
     }
     toggleLocalView(true);
-  });
-
-  document.getElementById("btn-view-global").addEventListener("click", () => {
-    viewMode = 'global';
-    document.getElementById("btn-view-global").classList.add("active");
-    document.getElementById("btn-view-local").classList.remove("active");
-    document.getElementById("btn-view-faculty").classList.remove("active");
-    updateLayoutToggleBtnVisibility();
-    renderGraph();
   });
 
   // Floating Graph Controls
@@ -1932,6 +2304,7 @@ function setupEventListeners() {
   });
 
   document.getElementById("compress-toggle-btn").addEventListener("click", () => {
+    saveCurrentView();
     useCompression = !useCompression;
     const btn = document.getElementById("compress-toggle-btn");
     if (useCompression) {
@@ -1939,7 +2312,9 @@ function setupEventListeners() {
     } else {
       btn.classList.remove("active");
     }
-    applyCompression();
+    // Lay the graph out again with tighter spacing, rather than scaling the
+    // existing coordinates down - that just pushed nodes on top of each other.
+    renderGraph();
   });
 
   document.getElementById("node-size-slider").addEventListener("input", (e) => {
@@ -2155,7 +2530,7 @@ function populateModalCoursesTable(query = "") {
       prereqs.delete(selectedCourseCode); // Don't hide the selected course itself
       prereqs.forEach(code => hiddenByPrereqFilter.add(code));
     } else {
-      // Faculty/Global view: hide courses that don't match the active filters
+      // Faculty view: hide courses that don't match the active filters
       // (i.e. supporting prereqs pulled in from other faculties)
       const coreCodes = new Set(currentFilteredCourses.map(c => c.general["מספר מקצוע"]));
       allVisibleCourses.forEach(course => {
@@ -2246,7 +2621,7 @@ function buildNodeObject(code) {
     return {
       id: code,
       label: wrapText(name, 15),
-      title: `${code} - ${name}\n${fac}\nנקודות: ${course.general["נקודות"]}`,
+      title: buildNodeTooltip(code, 'offered'),
       color: {
         background: isSelected ? hexToRgba(getFacultyColor(fac), 0.8) : hexToRgba(getFacultyColor(fac), isLightTheme ? 0.15 : 0.25),
         border: isSelected ? (isLightTheme ? '#111827' : '#ffffff') : getFacultyColor(fac),
@@ -2261,33 +2636,24 @@ function buildNodeObject(code) {
     };
   }
 
-  // Historical node
+  // Runs in other semesters, just not this one
   const hist = historicalCoursesInfo.get(code);
-  const isLT = document.body.classList.contains("light-theme");
   if (hist) {
-    return {
+    return applyUnofferedNodeStyle({
       id: code,
       label: wrapText(hist.general["שם מקצוע"], 15),
-      title: `${code} - ${hist.general["שם מקצוע"]}\n${hist.general["פקולטה"]} (לא מוצע הסמסטר)\nנקודות: ${hist.general["נקודות"]}`,
-      color: { background: 'rgba(239,68,68,0.08)', border: '#ef4444', highlight: { background: 'rgba(239,68,68,0.2)', border: '#ef4444' } },
-      borderWidth: 1.5,
-      shapeProperties: { borderDashes: [3, 3] },
-      font: { color: isLT ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 },
+      title: buildNodeTooltip(code, 'other-semester'),
       shadow: false
-    };
+    }, OTHER_SEMESTER_STYLE, isLightTheme);
   }
 
-  // Pure external node
-  return {
+  // Only ever seen inside a prerequisite list
+  return applyUnofferedNodeStyle({
     id: code,
-    label: code,
-    title: `${code}\nקורס חיצוני (לא מוצע הסמסטר)`,
-    color: { background: 'rgba(239, 68, 68, 0.08)', border: '#ef4444', highlight: { background: 'rgba(239, 68, 68, 0.2)', border: '#ef4444' } },
-    borderWidth: 1.5,
-    shapeProperties: { borderDashes: [3, 3] },
-    font: { color: isLT ? '#b91c1c' : '#fca5a5', size: baseNodeFontSize - 0.5 },
+    label: prereqNames.has(code) ? wrapText(prereqNames.get(code), 15) : code,
+    title: buildNodeTooltip(code, 'external'),
     shadow: false
-  };
+  }, EXTERNAL_STYLE, isLightTheme);
 }
 
 /**
@@ -2436,11 +2802,7 @@ function _addBranchToDataset(codes) {
 
     const nodeObj = buildNodeObject(code);
     if (nodeObj) {
-      const factor = useCompression ? 0.6 : 1.0;
-      if (baselinePositions && baselinePositions[code]) {
-        nodeObj.x = baselinePositions[code].x * factor;
-        nodeObj.y = baselinePositions[code].y * factor;
-      } else if (hiddenNodePositions[code]) {
+      if (hiddenNodePositions[code]) {
         nodeObj.x = hiddenNodePositions[code].x;
         nodeObj.y = hiddenNodePositions[code].y;
       }
